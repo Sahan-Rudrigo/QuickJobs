@@ -5,7 +5,7 @@ import time
 import httpx
 from dotenv import load_dotenv
 from embedder import upsert_user_vectors, should_re_embed
-from cv_parser import parse_cv_sections
+from llm_parser import parse_cv_smart
 
 load_dotenv()
 
@@ -93,12 +93,11 @@ def process_cv_uploaded(body: dict):
     fallback_experience = user.get("experience_level", "") if user else ""
 
     # Step 2 — Parse CV text into 3 sections
-    sections = parse_cv_sections(
+    sections = parse_cv_smart(
         raw_text=extracted_text,
         fallback_skills=fallback_skills,
         fallback_experience=fallback_experience
     )
-
     print(f"[INFO] Parsed sections for {phone}:")
     print(f"  Skills: {sections['skills'][:60]}...")
     print(f"  Experience: {sections['experience'][:60]}...")
