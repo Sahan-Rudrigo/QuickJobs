@@ -12,6 +12,9 @@ model = SentenceTransformer('all-MiniLM-L6-v2')
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 index = pc.Index(os.getenv("PINECONE_INDEX"))
 
+# Fields whose change warrants a full re-embed
+_RE_EMBED_FIELDS = {"skills", "experience_level", "cv_version", "job_type_preference"}
+
 
 def embed_text(text: str) -> list:
     """Convert any text into a 384-dimension vector."""
@@ -37,6 +40,17 @@ def embed_cv(phone: str, skills: list, experience: str, full_text: str) -> list:
             "metadata": {"phone": phone, "section": "summary"}
         }
     ]
+
+
+def should_re_embed(old_profile: dict, new_profile: dict) -> bool:
+    """
+    Return True if the diff between old and new profile touches fields that
+    affect match quality and therefore require fresh Pinecone vectors.
+    """
+    for field in _RE_EMBED_FIELDS:
+        if old_profile.get(field) != new_profile.get(field):
+            return True
+    return False
 
 
 def embed_job(job_id: str, title: str, skills: list, description: str) -> dict:
