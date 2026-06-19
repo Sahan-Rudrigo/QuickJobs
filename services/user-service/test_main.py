@@ -3,23 +3,38 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from unittest.mock import patch
+from sqlalchemy import JSON
+
+from main import app
+from database import Base, get_db
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy_utils import database_exists, create_database  # Add this import
+from unittest.mock import patch
 
 from main import app
 from database import Base, get_db
 
 # ─────────────────────────────────────────
 # TEST DATABASE SETUP
-# Uses a separate SQLite database for testing
-# So tests don't affect your real PostgreSQL data
+# Uses PostgreSQL. Auto-creates the database if missing!
 # ─────────────────────────────────────────
-TEST_DATABASE_URL = "sqlite:///./test_users.db"
+TEST_DATABASE_URL = "postgresql://admin:password123@localhost:5433/quickjobs"
 
-engine = create_engine(
-    TEST_DATABASE_URL,
-    connect_args={"check_same_thread": False}
+engine = create_engine(TEST_DATABASE_URL)
+
+# 🚀 THE MAGIC FIX: If quickjobs_test doesn't exist, create it!
+if not database_exists(engine.url):
+    create_database(engine.url)
+
+TestingSessionLocal = sessionmaker(
+    autocommit=False,
+    autoflush=False,
+    bind=engine
 )
-TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
 
 def override_get_db():
     db = TestingSessionLocal()
@@ -27,7 +42,6 @@ def override_get_db():
         yield db
     finally:
         db.close()
-
 
 # Override the real database with test database
 app.dependency_overrides[get_db] = override_get_db
