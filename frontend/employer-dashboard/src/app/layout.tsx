@@ -14,8 +14,8 @@ const geistMono = localFont({
 });
 
 export const metadata: Metadata = {
-  title: "QuickJobs — Employer Portal",
-  description: "Post jobs and find matched candidates via WhatsApp",
+  title: "QuickJobs Employer",
+  description: "QuickJobs Employer Portal",
 };
 
 export default function RootLayout({
