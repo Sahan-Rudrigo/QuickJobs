@@ -1,1 +1,8 @@
 venv
+.env
+INTEGRATION.md
+__pycache__
+*.pyc
+generate_report.py
+QuickJobs_Progress_Report.html
+QuickJobs_Progress_Report.pdf
