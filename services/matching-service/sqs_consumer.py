@@ -2,6 +2,7 @@ import boto3
 import json
 import os
 import time
+import httpx
 from dotenv import load_dotenv
 from embedder import embed_cv, index
 
@@ -14,18 +15,37 @@ sqs = boto3.client(
     aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY")
 )
 
-CV_QUEUE_URL = os.getenv("SQS_CV_UPLOADED_URL")
+CV_QUEUE_URL         = os.getenv("SQS_CV_UPLOADED_URL")
+COMPANY_SERVICE_URL  = os.getenv("COMPANY_SERVICE_URL", "http://localhost:8003")
+
+
+def _notify_company_service(phone: str, job_ids: list) -> None:
+    """
+    For each matched job, tell Company Service to add this candidate as an applicant.
+    This enables the employer to see new reverse-matched candidates in their dashboard.
+    """
+    for job_id in job_ids:
+        try:
+            httpx.post(
+                f"{COMPANY_SERVICE_URL}/jobs/{job_id}/applicants",
+                json={"phone": phone},
+                timeout=5,
+            )
+        except Exception as e:
+            print(f"[WARN] Could not notify company-service for job {job_id}: {e}")
 
 
 def process_cv_uploaded(body: dict):
     """
     Called when a CV upload event arrives from SQS.
-    Embeds the candidate profile and stores vectors in Pinecone.
+    1. Embed the candidate profile into Pinecone.
+    2. Run reverse matching to find active jobs that match this candidate.
+    3. Notify Company Service so employer dashboards update immediately.
     """
-    phone = body.get("phone")
-    skills = body.get("skills", [])
+    phone      = body.get("phone")
+    skills     = body.get("skills", [])
     experience = body.get("experience", "")
-    full_text = body.get("full_text", "")
+    full_text  = body.get("full_text", "")
 
     if not phone:
         print(f"[ERROR] Missing phone in message: {body}")
@@ -33,24 +53,37 @@ def process_cv_uploaded(body: dict):
 
     print(f"[INFO] Processing CV for {phone}")
 
-    # Generate 3 vectors for this candidate
+    # Step 1: embed and store candidate vectors
     vectors = embed_cv(phone, skills, experience, full_text)
-
-    # Store in Pinecone
     index.upsert(vectors=vectors)
-
     print(f"[INFO] Embedded and stored vectors for {phone}")
+
+    # Step 2: reverse match — find jobs that match this candidate
+    try:
+        from matcher import find_matching_jobs
+        matched_job_ids = find_matching_jobs(
+            phone=phone,
+            skills=skills,
+            experience=experience,
+            full_text=full_text,
+        )
+        if matched_job_ids:
+            print(f"[INFO] Reverse match: {phone} matched {len(matched_job_ids)} job(s)")
+            _notify_company_service(phone, matched_job_ids)
+        else:
+            print(f"[INFO] No reverse job matches for {phone}")
+    except Exception as e:
+        print(f"[WARN] Reverse matching failed for {phone}: {e}")
 
 
 def poll_cv_queue():
     """
     Continuously poll SQS for new CV upload events.
-    This runs as a background process.
+    Runs as a background daemon thread.
     """
     print("[INFO] Starting SQS consumer — waiting for CV events...")
 
     while True:
-        # Skip if queue URL not configured yet
         if not CV_QUEUE_URL:
             print("[WARN] SQS_CV_UPLOADED_URL not set — skipping poll")
             time.sleep(5)
@@ -59,24 +92,19 @@ def poll_cv_queue():
         response = sqs.receive_message(
             QueueUrl=CV_QUEUE_URL,
             MaxNumberOfMessages=10,
-            WaitTimeSeconds=20  # long polling — efficient, not spammy
+            WaitTimeSeconds=20,
         )
 
-        messages = response.get("Messages", [])
-
-        for msg in messages:
+        for msg in response.get("Messages", []):
             try:
                 body = json.loads(msg["Body"])
                 process_cv_uploaded(body)
-
-                # Delete message after successful processing
                 sqs.delete_message(
                     QueueUrl=CV_QUEUE_URL,
                     ReceiptHandle=msg["ReceiptHandle"]
                 )
             except Exception as e:
                 print(f"[ERROR] Failed to process message: {e}")
-                # Don't delete — let it retry or go to DLQ
 
         time.sleep(1)
 

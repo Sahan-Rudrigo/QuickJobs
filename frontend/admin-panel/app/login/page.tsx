@@ -2,7 +2,7 @@
 
 import '@/app/lib/amplify';
 import { useState } from 'react';
-import { signIn, confirmSignIn } from 'aws-amplify/auth';
+import { signIn, confirmSignIn, resetPassword, confirmResetPassword } from 'aws-amplify/auth';
 import { useRouter } from 'next/navigation';
 import { ShieldCheck, Eye, EyeOff, AlertCircle } from 'lucide-react';
 
@@ -13,6 +13,10 @@ export default function AdminLoginPage() {
   const [newPassword, setNewPassword]                 = useState('');
   const [showPassword, setShowPassword]               = useState(false);
   const [requiresNewPassword, setRequiresNewPassword] = useState(false);
+  const [forgotMode, setForgotMode]                   = useState(false);
+  const [resetCodeSent, setResetCodeSent]             = useState(false);
+  const [resetCode, setResetCode]                     = useState('');
+  const [newPasswordReset, setNewPasswordReset]       = useState('');
   const [error, setError]                             = useState('');
   const [loading, setLoading]                         = useState(false);
 
@@ -39,6 +43,28 @@ export default function AdminLoginPage() {
       router.push('/dashboard');
     } catch (err: any) {
       setError(err.message || 'Failed to set new password.');
+    } finally { setLoading(false); }
+  };
+
+  const handleForgotRequest = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true); setError('');
+    try {
+      await resetPassword({ username: email });
+      setResetCodeSent(true);
+    } catch (err: any) {
+      setError(err.message || 'Could not send reset code.');
+    } finally { setLoading(false); }
+  };
+
+  const handleForgotConfirm = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true); setError('');
+    try {
+      await confirmResetPassword({ username: email, confirmationCode: resetCode, newPassword: newPasswordReset });
+      setForgotMode(false); setResetCodeSent(false); setError('');
+    } catch (err: any) {
+      setError(err.message || 'Could not reset password.');
     } finally { setLoading(false); }
   };
 
@@ -129,12 +155,46 @@ export default function AdminLoginPage() {
               {error && <ErrorBox message={error} />}
               <SubmitBtn loading={loading} label="Set Password & Continue" />
             </form>
+          ) : forgotMode ? (
+            <div>
+              {!resetCodeSent ? (
+                <form onSubmit={handleForgotRequest} className="space-y-4">
+                  <p className="text-sm mb-2" style={{ color: 'var(--text-secondary)' }}>Enter your admin email to receive a reset code.</p>
+                  <Field label="Email address" type="email" value={email} onChange={setEmail} placeholder="admin@quickjobs.com" />
+                  {error && <ErrorBox message={error} />}
+                  <SubmitBtn loading={loading} label="Send Reset Code" />
+                  <button type="button" onClick={() => { setForgotMode(false); setError(''); }} className="w-full text-sm mt-2" style={{ color: 'var(--text-secondary)' }}>← Back</button>
+                </form>
+              ) : (
+                <form onSubmit={handleForgotConfirm} className="space-y-4">
+                  <p className="text-sm mb-2" style={{ color: 'var(--text-secondary)' }}>Check your email for the reset code.</p>
+                  <Field label="Reset Code" value={resetCode} onChange={setResetCode} placeholder="6-digit code" />
+                  <Field label="New Password" type={showPassword ? 'text' : 'password'} value={newPasswordReset} onChange={setNewPasswordReset}
+                    placeholder="Minimum 8 characters" minLength={8}
+                    suffix={<EyeToggle show={showPassword} onToggle={() => setShowPassword(v => !v)} />} />
+                  {error && <ErrorBox message={error} />}
+                  <SubmitBtn loading={loading} label="Reset Password" />
+                  <button type="button" onClick={() => { setForgotMode(false); setResetCodeSent(false); setError(''); }} className="w-full text-sm mt-2" style={{ color: 'var(--text-secondary)' }}>← Back</button>
+                </form>
+              )}
+            </div>
           ) : (
             <form onSubmit={handleLogin} className="space-y-4">
               <Field label="Email address" type="email" value={email} onChange={setEmail} placeholder="admin@quickjobs.com" />
-              <Field label="Password" type={showPassword ? 'text' : 'password'} value={password} onChange={setPassword}
-                placeholder="Enter your password"
-                suffix={<EyeToggle show={showPassword} onToggle={() => setShowPassword(v => !v)} />} />
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-sm font-medium" style={{ color: 'var(--text-primary)', letterSpacing: '0.01em' }}>Password</label>
+                  <button type="button" onClick={() => { setForgotMode(true); setError(''); }} className="text-xs font-medium" style={{ color: 'var(--accent-1)' }}>Forgot password?</button>
+                </div>
+                <div className="relative">
+                  <input type={showPassword ? 'text' : 'password'} value={password} onChange={e => setPassword(e.target.value)} required
+                    placeholder="Enter your password" className="w-full text-sm"
+                    style={{ padding: '11px 16px', paddingRight: '44px', background: 'var(--bg-sunken)', border: '1px solid transparent', borderRadius: '10px', color: 'var(--text-primary)', outline: 'none' }}
+                    onFocus={e => { e.target.style.borderColor = 'var(--accent-1)'; e.target.style.boxShadow = '0 0 0 3px rgba(79,70,229,0.12)'; }}
+                    onBlur={e => { e.target.style.borderColor = 'transparent'; e.target.style.boxShadow = 'none'; }} />
+                  <div className="absolute right-3 top-1/2 -translate-y-1/2"><EyeToggle show={showPassword} onToggle={() => setShowPassword(v => !v)} /></div>
+                </div>
+              </div>
               {error && <ErrorBox message={error} />}
               <SubmitBtn loading={loading} label="Sign In" />
             </form>

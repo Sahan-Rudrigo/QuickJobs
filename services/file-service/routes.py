@@ -129,3 +129,27 @@ def get_cv_download_url(phone: str, db: Session = Depends(get_db)):
 
     url = get_presigned_url(latest.s3_key)
     return {"phone": phone, "version": latest.version, "download_url": url}
+
+
+@router.delete("/{phone}")
+def delete_all_cv_records(phone: str, db: Session = Depends(get_db)):
+    """
+    Delete all CV versions for a phone number from S3 and the database.
+    Called by the WhatsApp Gateway during PDPA right-to-erasure flow.
+    """
+    records = (
+        db.query(CVRecord)
+        .filter(CVRecord.phone == phone)
+        .all()
+    )
+    deleted = 0
+    for record in records:
+        try:
+            delete_cv(record.s3_key)
+        except Exception as e:
+            print(f"[WARN] Could not delete S3 object {record.s3_key}: {e}")
+        db.delete(record)
+        deleted += 1
+
+    db.commit()
+    return {"phone": phone, "deleted_versions": deleted, "message": f"Deleted {deleted} CV version(s)"}

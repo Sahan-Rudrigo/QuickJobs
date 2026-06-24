@@ -7,7 +7,7 @@ import { useRouter } from 'next/navigation';
 import {
   LayoutDashboard, Building2, Briefcase, Users, LogOut,
   CheckCircle, XCircle, Clock, ChevronRight, Menu, X,
-  ShieldCheck, AlertCircle, RefreshCw,
+  ShieldCheck, AlertCircle, RefreshCw, Search,
 } from 'lucide-react';
 
 type CompanyStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'SUSPENDED';
@@ -38,6 +38,14 @@ export default function AdminDashboard() {
   const [stats, setStats]         = useState<Stats | null>(null);
   const [loading, setLoading]     = useState(true);
   const [error, setError]         = useState('');
+
+  const [companySearch, setCompanySearch] = useState('');
+  const [jobSearch, setJobSearch]         = useState('');
+  const [userSearch, setUserSearch]       = useState('');
+  const [companyPage, setCompanyPage]     = useState(1);
+  const [jobPage, setJobPage]             = useState(1);
+  const [userPage, setUserPage]           = useState(1);
+  const PAGE_SIZE = 10;
 
   useEffect(() => {
     async function init() {
@@ -83,6 +91,15 @@ export default function AdminDashboard() {
     }
   }
 
+  async function activate(id: string) {
+    const res = await fetch(`${COMPANY_URL}/admin/companies/${id}/activate`, { method: 'PATCH' });
+    if (res.ok) {
+      const updated: Company = await res.json();
+      setCompanies(prev => prev.map(c => c.id === id ? updated : c));
+      setStats(s => s ? { ...s, pending_approvals: Math.max(0, s.pending_approvals - 1), approved_companies: s.approved_companies + 1 } : s);
+    }
+  }
+
   async function approve(id: string) {
     const res = await fetch(`${COMPANY_URL}/admin/companies/${id}/approve`, { method: 'PATCH' });
     if (res.ok) {
@@ -101,8 +118,51 @@ export default function AdminDashboard() {
     }
   }
 
+  async function suspend(id: string) {
+    const res = await fetch(`${COMPANY_URL}/admin/companies/${id}/suspend`, { method: 'PATCH' });
+    if (res.ok) {
+      const updated: Company = await res.json();
+      setCompanies(prev => prev.map(c => c.id === id ? updated : c));
+    }
+  }
+
   const pending  = companies.filter(c => c.status === 'PENDING');
   const approved = companies.filter(c => c.status === 'APPROVED');
+
+  const filteredPending = pending.filter(c =>
+    !companySearch ||
+    c.name.toLowerCase().includes(companySearch.toLowerCase()) ||
+    c.email.toLowerCase().includes(companySearch.toLowerCase()) ||
+    (c.industry || '').toLowerCase().includes(companySearch.toLowerCase())
+  );
+  const filteredReviewed = companies.filter(c => c.status !== 'PENDING').filter(c =>
+    !companySearch ||
+    c.name.toLowerCase().includes(companySearch.toLowerCase()) ||
+    c.email.toLowerCase().includes(companySearch.toLowerCase())
+  );
+  const filteredJobs = jobs.filter(j =>
+    !jobSearch ||
+    j.title.toLowerCase().includes(jobSearch.toLowerCase()) ||
+    j.company_name.toLowerCase().includes(jobSearch.toLowerCase()) ||
+    (j.location || '').toLowerCase().includes(jobSearch.toLowerCase())
+  );
+  const filteredUsers = users.filter(u =>
+    !userSearch ||
+    (u.name || '').toLowerCase().includes(userSearch.toLowerCase()) ||
+    u.phone.includes(userSearch) ||
+    (u.location || '').toLowerCase().includes(userSearch.toLowerCase()) ||
+    (u.skills || []).some(s => s.toLowerCase().includes(userSearch.toLowerCase()))
+  );
+
+  const pendingPages   = Math.max(1, Math.ceil(filteredPending.length / PAGE_SIZE));
+  const reviewedPages  = Math.max(1, Math.ceil(filteredReviewed.length / PAGE_SIZE));
+  const jobPages       = Math.max(1, Math.ceil(filteredJobs.length / PAGE_SIZE));
+  const userPages      = Math.max(1, Math.ceil(filteredUsers.length / PAGE_SIZE));
+
+  const pagedPending   = filteredPending.slice((companyPage - 1) * PAGE_SIZE, companyPage * PAGE_SIZE);
+  const pagedReviewed  = filteredReviewed.slice((companyPage - 1) * PAGE_SIZE, companyPage * PAGE_SIZE);
+  const pagedJobs      = filteredJobs.slice((jobPage - 1) * PAGE_SIZE, jobPage * PAGE_SIZE);
+  const pagedUsers     = filteredUsers.slice((userPage - 1) * PAGE_SIZE, userPage * PAGE_SIZE);
 
   const navItems = [
     { name: 'Overview',          icon: <LayoutDashboard size={16} />               },
@@ -275,7 +335,16 @@ export default function AdminDashboard() {
           {/* ── COMPANY APPROVALS ── */}
           {view === 'Company Approvals' && (
             <div className="space-y-4 max-w-[1280px]">
-              {pending.length === 0 ? (
+              {/* Search */}
+              <div className="flex items-center gap-2 rounded-xl"
+                style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', padding: '10px 16px' }}>
+                <Search size={14} style={{ color: 'var(--text-tertiary)', flexShrink: 0 }} />
+                <input className="flex-1 bg-transparent text-sm outline-none" placeholder="Search by name, email or industry…"
+                  style={{ color: 'var(--text-primary)' }}
+                  value={companySearch} onChange={e => { setCompanySearch(e.target.value); setCompanyPage(1); }} />
+              </div>
+
+              {filteredPending.length === 0 && pending.length === 0 ? (
                 <div style={{ ...card, padding: '64px', textAlign: 'center' }}>
                   <div className="w-12 h-12 rounded-2xl flex items-center justify-center mx-auto mb-4" style={{ background: '#F0FDF4' }}>
                     <CheckCircle size={22} style={{ color: '#16A34A' }} />
@@ -283,14 +352,14 @@ export default function AdminDashboard() {
                   <p className="font-medium mb-1" style={{ color: 'var(--text-primary)' }}>All caught up</p>
                   <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>No pending approvals at this time.</p>
                 </div>
-              ) : (
+              ) : filteredPending.length > 0 ? (
                 <div style={{ ...card }}>
                   <div style={{ padding: '24px 32px', borderBottom: '1px solid var(--border-subtle)' }}>
                     <p className="font-semibold" style={{ color: 'var(--text-primary)', fontSize: '15px' }}>Awaiting Review</p>
-                    <p className="text-xs mt-0.5" style={{ color: 'var(--text-secondary)' }}>{pending.length} company registration{pending.length !== 1 ? 's' : ''}</p>
+                    <p className="text-xs mt-0.5" style={{ color: 'var(--text-secondary)' }}>{filteredPending.length} registration{filteredPending.length !== 1 ? 's' : ''}</p>
                   </div>
                   <div style={{ padding: '0 32px' }}>
-                    {pending.map(c => (
+                    {pagedPending.map(c => (
                       <div key={c.id} className="flex items-center justify-between gap-6 py-5" style={{ borderBottom: '1px solid var(--border-subtle)' }}>
                         <div>
                           <div className="flex items-center gap-2.5 mb-1">
@@ -300,8 +369,14 @@ export default function AdminDashboard() {
                           <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>{c.email} · {c.industry || 'N/A'} · Registered {new Date(c.registered_at).toLocaleDateString()}</p>
                         </div>
                         <div className="flex gap-2 shrink-0">
+                          <button onClick={() => activate(c.id)} className="flex items-center gap-1.5 text-xs font-medium transition-all"
+                            style={{ padding: '7px 14px', background: '#EFF6FF', borderRadius: '8px', color: '#1D4ED8' }}
+                            title="Approve and grant login access via Cognito group">
+                            <CheckCircle size={13} />Activate &amp; Approve
+                          </button>
                           <button onClick={() => approve(c.id)} className="flex items-center gap-1.5 text-xs font-medium transition-all"
-                            style={{ padding: '7px 14px', background: '#F0FDF4', borderRadius: '8px', color: '#15803D' }}>
+                            style={{ padding: '7px 14px', background: '#F0FDF4', borderRadius: '8px', color: '#15803D' }}
+                            title="Approve without Cognito group (for admin-created accounts)">
                             <CheckCircle size={13} />Approve
                           </button>
                           <button onClick={() => reject(c.id)} className="flex items-center gap-1.5 text-xs font-medium transition-all"
@@ -312,25 +387,50 @@ export default function AdminDashboard() {
                       </div>
                     ))}
                   </div>
+                  {pendingPages > 1 && (
+                    <div style={{ padding: '16px 32px' }}>
+                      <Paginator page={companyPage} total={pendingPages} onChange={setCompanyPage} />
+                    </div>
+                  )}
                 </div>
-              )}
+              ) : null}
 
-              {companies.filter(c => c.status !== 'PENDING').length > 0 && (
+              {filteredReviewed.length > 0 && (
                 <div style={{ ...card }}>
                   <div style={{ padding: '24px 32px', borderBottom: '1px solid var(--border-subtle)' }}>
                     <p className="font-semibold" style={{ color: 'var(--text-primary)', fontSize: '15px' }}>Reviewed</p>
+                    <p className="text-xs mt-0.5" style={{ color: 'var(--text-secondary)' }}>{filteredReviewed.length} companies</p>
                   </div>
                   <div style={{ padding: '0 32px' }}>
-                    {companies.filter(c => c.status !== 'PENDING').map(c => (
-                      <div key={c.id} className="flex items-center justify-between py-4" style={{ borderBottom: '1px solid var(--border-subtle)' }}>
-                        <div>
+                    {pagedReviewed.map(c => (
+                      <div key={c.id} className="flex items-center justify-between py-4 gap-4" style={{ borderBottom: '1px solid var(--border-subtle)' }}>
+                        <div className="flex-1 min-w-0">
                           <p className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>{c.name}</p>
                           <p className="text-xs mt-0.5" style={{ color: 'var(--text-secondary)' }}>{c.email} · {c.industry || 'N/A'}</p>
                         </div>
-                        <CompanyBadge status={c.status} />
+                        <div className="flex items-center gap-2 shrink-0">
+                          <CompanyBadge status={c.status} />
+                          {c.status === 'APPROVED' && (
+                            <button onClick={() => suspend(c.id)} className="text-xs font-medium transition-all"
+                              style={{ padding: '5px 10px', background: 'var(--bg-sunken)', borderRadius: '6px', color: 'var(--text-secondary)' }}>
+                              Suspend
+                            </button>
+                          )}
+                          {c.status === 'SUSPENDED' && (
+                            <button onClick={() => approve(c.id)} className="text-xs font-medium transition-all"
+                              style={{ padding: '5px 10px', background: '#F0FDF4', borderRadius: '6px', color: '#15803D' }}>
+                              Reinstate
+                            </button>
+                          )}
+                        </div>
                       </div>
                     ))}
                   </div>
+                  {reviewedPages > 1 && (
+                    <div style={{ padding: '16px 32px' }}>
+                      <Paginator page={companyPage} total={reviewedPages} onChange={setCompanyPage} />
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -339,16 +439,25 @@ export default function AdminDashboard() {
           {/* ── JOB LISTINGS ── */}
           {view === 'Job Listings' && (
             <div className="space-y-3 max-w-[1280px]">
-              <div className="mb-6">
-                <h2 className="font-semibold mb-1" style={{ fontSize: '20px', color: 'var(--text-primary)', letterSpacing: '-0.01em' }}>Job Listings</h2>
-                <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>{jobs.length} listings across all companies</p>
+              <div className="flex items-start justify-between mb-2">
+                <div>
+                  <h2 className="font-semibold mb-1" style={{ fontSize: '20px', color: 'var(--text-primary)', letterSpacing: '-0.01em' }}>Job Listings</h2>
+                  <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>{filteredJobs.length} of {jobs.length} listings</p>
+                </div>
               </div>
-              {jobs.length === 0 && !loading && (
+              <div className="flex items-center gap-2 rounded-xl mb-2"
+                style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', padding: '10px 16px' }}>
+                <Search size={14} style={{ color: 'var(--text-tertiary)', flexShrink: 0 }} />
+                <input className="flex-1 bg-transparent text-sm outline-none" placeholder="Search by title, company or location…"
+                  style={{ color: 'var(--text-primary)' }}
+                  value={jobSearch} onChange={e => { setJobSearch(e.target.value); setJobPage(1); }} />
+              </div>
+              {filteredJobs.length === 0 && !loading && (
                 <div style={{ ...card, padding: '64px', textAlign: 'center' }}>
-                  <p className="text-sm" style={{ color: 'var(--text-tertiary)' }}>No jobs posted yet.</p>
+                  <p className="text-sm" style={{ color: 'var(--text-tertiary)' }}>{jobSearch ? 'No jobs match your search.' : 'No jobs posted yet.'}</p>
                 </div>
               )}
-              {jobs.map(job => (
+              {pagedJobs.map(job => (
                 <div key={job.id} className="flex items-center justify-between gap-6" style={{ ...card, padding: '20px 28px' }}>
                   <div>
                     <div className="flex items-center gap-2.5 mb-1">
@@ -363,22 +472,32 @@ export default function AdminDashboard() {
                     style={{ background: 'var(--bg-sunken)', color: 'var(--text-secondary)' }}>{job.job_type}</span>
                 </div>
               ))}
+              {jobPages > 1 && <Paginator page={jobPage} total={jobPages} onChange={setJobPage} />}
             </div>
           )}
 
           {/* ── USER MANAGEMENT ── */}
           {view === 'User Management' && (
             <div className="space-y-3 max-w-[1280px]">
-              <div className="mb-6">
-                <h2 className="font-semibold mb-1" style={{ fontSize: '20px', color: 'var(--text-primary)', letterSpacing: '-0.01em' }}>User Management</h2>
-                <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>{users.length} registered job seekers</p>
+              <div className="flex items-start justify-between mb-2">
+                <div>
+                  <h2 className="font-semibold mb-1" style={{ fontSize: '20px', color: 'var(--text-primary)', letterSpacing: '-0.01em' }}>User Management</h2>
+                  <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>{filteredUsers.length} of {users.length} registered job seekers</p>
+                </div>
               </div>
-              {users.length === 0 && !loading && (
+              <div className="flex items-center gap-2 rounded-xl mb-2"
+                style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', padding: '10px 16px' }}>
+                <Search size={14} style={{ color: 'var(--text-tertiary)', flexShrink: 0 }} />
+                <input className="flex-1 bg-transparent text-sm outline-none" placeholder="Search by name, phone, location or skill…"
+                  style={{ color: 'var(--text-primary)' }}
+                  value={userSearch} onChange={e => { setUserSearch(e.target.value); setUserPage(1); }} />
+              </div>
+              {filteredUsers.length === 0 && !loading && (
                 <div style={{ ...card, padding: '64px', textAlign: 'center' }}>
-                  <p className="text-sm" style={{ color: 'var(--text-tertiary)' }}>No users registered yet.</p>
+                  <p className="text-sm" style={{ color: 'var(--text-tertiary)' }}>{userSearch ? 'No users match your search.' : 'No users registered yet.'}</p>
                 </div>
               )}
-              {users.map(user => (
+              {pagedUsers.map(user => (
                 <div key={user.phone} style={{ ...card, padding: '24px 28px' }}>
                   <div className="flex items-start justify-between gap-4">
                     <div>
@@ -407,6 +526,7 @@ export default function AdminDashboard() {
                   </div>
                 </div>
               ))}
+              {userPages > 1 && <Paginator page={userPage} total={userPages} onChange={setUserPage} />}
             </div>
           )}
 
@@ -417,6 +537,24 @@ export default function AdminDashboard() {
 }
 
 // ── Sub-components ────────────────────────────────────────────────────
+
+function Paginator({ page, total, onChange }: { page: number; total: number; onChange: (p: number) => void }) {
+  return (
+    <div className="flex items-center justify-between pt-2">
+      <button disabled={page === 1} onClick={() => onChange(page - 1)}
+        className="text-xs font-medium px-3 py-1.5 rounded-lg transition-all"
+        style={{ background: page === 1 ? 'transparent' : 'var(--bg-sunken)', color: page === 1 ? 'var(--text-tertiary)' : 'var(--text-secondary)', cursor: page === 1 ? 'default' : 'pointer' }}>
+        ← Previous
+      </button>
+      <span className="text-xs" style={{ color: 'var(--text-tertiary)' }}>Page {page} of {total}</span>
+      <button disabled={page === total} onClick={() => onChange(page + 1)}
+        className="text-xs font-medium px-3 py-1.5 rounded-lg transition-all"
+        style={{ background: page === total ? 'transparent' : 'var(--bg-sunken)', color: page === total ? 'var(--text-tertiary)' : 'var(--text-secondary)', cursor: page === total ? 'default' : 'pointer' }}>
+        Next →
+      </button>
+    </div>
+  );
+}
 
 function CompanyBadge({ status }: { status: CompanyStatus }) {
   const styles: Record<CompanyStatus, React.CSSProperties> = {

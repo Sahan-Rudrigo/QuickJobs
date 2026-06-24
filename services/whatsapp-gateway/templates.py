@@ -97,3 +97,23 @@ INVALID_SALARY = (
 )
 
 CV_RECEIVED = "✅ CV received! We're processing it now..."
+
+ASK_DELETE_CONFIRM = (
+    "⚠️ *Delete My Data*\n\n"
+    "This will permanently erase all your information from QuickJobs:\n"
+    "• Your profile and skills\n"
+    "• All uploaded CVs\n"
+    "• Your job alert history\n\n"
+    "Reply *CONFIRM DELETE* to proceed, or anything else to cancel."
+)
+
+DATA_DELETED_CONFIRM = (
+    "✅ *Your data has been permanently deleted.*\n\n"
+    "All your personal information and uploaded CVs have been removed from QuickJobs.\n\n"
+    "You will no longer receive job alerts.\n\n"
+    "_If you'd like to register again in the future, just send *HI* to get started._"
+)
+
+DATA_DELETE_CANCELLED = (
+    "✅ Deletion cancelled. Your data is safe."
+)

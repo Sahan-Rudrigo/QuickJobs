@@ -15,6 +15,9 @@ UPDATE_FIELD_MAP = {
 }
 
 USER_SERVICE_URL = os.getenv("USER_SERVICE_URL", "http://localhost:8001")
+FILE_SERVICE_URL = os.getenv("FILE_SERVICE_URL", "http://localhost:8002")
+
+_DELETE_KEYWORDS = {"DELETE MY DATA", "DELETE DATA", "ERASE MY DATA", "ERASE DATA"}
 
 
 def _parse_salary(text: str):
@@ -29,10 +32,7 @@ def _parse_salary(text: str):
 
 
 async def _create_user_profile(phone: str, data: dict) -> None:
-    """
-    Create user profile in User Service after onboarding completes.
-    If user already exists (re-registered), patch instead.
-    """
+    """Create user profile in User Service after onboarding completes."""
     payload = {
         "phone":            phone,
         "name":             data.get("name"),
@@ -49,11 +49,29 @@ async def _create_user_profile(phone: str, data: dict) -> None:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(f"{USER_SERVICE_URL}/users", json=payload)
             if resp.status_code == 400:
-                # User already exists — update instead
                 await client.patch(f"{USER_SERVICE_URL}/users/{phone}", json=payload)
         print(f"[INFO] User profile created/updated for {phone}")
     except Exception as e:
         print(f"[ERROR] Failed to create user profile for {phone}: {e}")
+
+
+async def _delete_user_data(phone: str) -> None:
+    """
+    PDPA right-to-erasure: delete all data for a phone number across services.
+    Calls user-service (profile) and file-service (CVs) in parallel.
+    Failures are logged but do not block the flow.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            user_del = client.delete(f"{USER_SERVICE_URL}/users/{phone}")
+            cv_del   = client.delete(f"{FILE_SERVICE_URL}/cv/{phone}")
+            import asyncio
+            results = await asyncio.gather(user_del, cv_del, return_exceptions=True)
+            for i, r in enumerate(results):
+                if isinstance(r, Exception):
+                    print(f"[WARN] Deletion request {i} failed: {r}")
+    except Exception as e:
+        print(f"[ERROR] Failed to complete data deletion for {phone}: {e}")
 
 
 async def handle_message(phone: str, text: str):
@@ -71,6 +89,23 @@ async def handle_message(phone: str, text: str):
     if text.upper() == "START":
         set_state(phone, "ACTIVE", data)
         await send_text(phone, templates.OPT_IN_CONFIRM)
+        return
+
+    # PDPA deletion request — available from any state
+    if text.upper() in _DELETE_KEYWORDS:
+        set_state(phone, "CONFIRMING_DELETE", data)
+        await send_text(phone, templates.ASK_DELETE_CONFIRM)
+        return
+
+    # ── Deletion confirmation state ───────────────────────────────
+    if step == "CONFIRMING_DELETE":
+        if text.upper() == "CONFIRM DELETE":
+            await _delete_user_data(phone)
+            set_state(phone, "IDLE", {})
+            await send_text(phone, templates.DATA_DELETED_CONFIRM)
+        else:
+            set_state(phone, "ACTIVE" if data else "IDLE", data)
+            await send_text(phone, templates.DATA_DELETE_CANCELLED)
         return
 
     # ── Onboarding flow ──────────────────────────────────────────
@@ -116,7 +151,6 @@ async def handle_message(phone: str, text: str):
 
     elif step == "AWAITING_CV":
         if text == "__CV_UPLOADED__":
-            # ── Create user profile in User Service ──────────────
             await _create_user_profile(phone, data)
             set_state(phone, "ACTIVE", data)
             await send_text(phone, templates.onboarding_complete(data.get("name", "")))
@@ -192,7 +226,6 @@ async def handle_message(phone: str, text: str):
             data.pop("_updating_field", None)
             data.pop("_pending_value", None)
 
-            # Sync update to User Service
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
                     await client.patch(f"{USER_SERVICE_URL}/users/{phone}", json={field: value})
