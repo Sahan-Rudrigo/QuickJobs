@@ -8,14 +8,15 @@ import {
   LayoutDashboard, PlusCircle, Briefcase, Users, LogOut,
   Bell, Search, TrendingUp, MapPin, Clock, DollarSign,
   Calendar, Trash2, RefreshCw, ChevronRight, Menu, X,
-  AlertCircle, CheckCircle,
+  AlertCircle, CheckCircle, Download,
 } from 'lucide-react';
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, Legend,
 } from 'recharts';
 
-const COMPANY_URL = process.env.NEXT_PUBLIC_COMPANY_SERVICE_URL || 'http://localhost:8003';
+const COMPANY_URL  = process.env.NEXT_PUBLIC_COMPANY_SERVICE_URL || 'http://localhost:8003';
+const FILE_URL     = process.env.NEXT_PUBLIC_FILE_SERVICE_URL    || 'http://localhost:8002';
 
 type Job = {
   id: string; company_id: string; company_name: string; title: string;
@@ -62,6 +63,8 @@ export default function DashboardPage() {
   const [postSuccess, setPostSuccess]   = useState(false);
   const [initLoading, setInitLoading]   = useState(true);
   const [jobsLoading, setJobsLoading]   = useState(false);
+
+  const [jobSearch, setJobSearch] = useState('');
 
   // Applicants tab state
   const [selectedJobId, setSelectedJobId]   = useState('');
@@ -181,6 +184,12 @@ export default function DashboardPage() {
     }
   };
 
+  const filteredJobs = jobs.filter(j =>
+    !jobSearch ||
+    j.title.toLowerCase().includes(jobSearch.toLowerCase()) ||
+    (j.location || '').toLowerCase().includes(jobSearch.toLowerCase()) ||
+    (j.skills || []).some(s => s.toLowerCase().includes(jobSearch.toLowerCase()))
+  );
   const activeJobs  = jobs.filter(j => j.status === 'Active').length;
   const totalApps   = jobs.reduce((s, j) => s + j.applications, 0);
   const jobsByType  = ['Full-time', 'Part-time', 'Contract', 'Remote', 'Internship']
@@ -313,7 +322,8 @@ export default function DashboardPage() {
             <div className="hidden md:flex items-center gap-2 rounded-xl"
               style={{ background: 'var(--bg-sunken)', padding: '8px 12px' }}>
               <Search size={13} style={{ color: 'var(--text-tertiary)' }} />
-              <input className="bg-transparent text-sm outline-none w-24" placeholder="Search…" style={{ color: 'var(--text-primary)' }} />
+              <input className="bg-transparent text-sm outline-none w-24" placeholder="Search jobs…" style={{ color: 'var(--text-primary)' }}
+                value={jobSearch} onChange={e => setJobSearch(e.target.value)} />
             </div>
             <button className="relative w-9 h-9 flex items-center justify-center rounded-xl" style={{ color: 'var(--text-secondary)' }}>
               <Bell size={17} />
@@ -508,7 +518,10 @@ export default function DashboardPage() {
               <div className="flex items-center justify-between mb-6">
                 <div>
                   <h2 className="font-semibold mb-0.5" style={{ fontSize: '20px', color: 'var(--text-primary)', letterSpacing: '-0.01em' }}>My Jobs</h2>
-                  <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>{jobs.length} listing{jobs.length !== 1 ? 's' : ''}</p>
+                  <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>
+                    {filteredJobs.length}{jobSearch ? ` of ${jobs.length}` : ''} listing{filteredJobs.length !== 1 ? 's' : ''}
+                    {jobSearch && <button onClick={() => setJobSearch('')} className="ml-2 text-xs" style={{ color: 'var(--accent-1)' }}>Clear</button>}
+                  </p>
                 </div>
                 <button onClick={() => setView('Post a Job')} className="flex items-center gap-2 text-white text-sm font-medium"
                   style={{ padding: '9px 18px', background: 'var(--accent-1)', borderRadius: '10px' }}>
@@ -524,9 +537,13 @@ export default function DashboardPage() {
                   <button onClick={() => setView('Post a Job')} className="text-white text-sm font-medium"
                     style={{ padding: '9px 20px', background: 'var(--accent-1)', borderRadius: '10px' }}>Post a Job</button>
                 </div>
+              ) : filteredJobs.length === 0 ? (
+                <div style={{ ...card, padding: '64px', textAlign: 'center' }}>
+                  <p className="text-sm" style={{ color: 'var(--text-tertiary)' }}>No jobs match your search.</p>
+                </div>
               ) : (
                 <div className="space-y-3">
-                  {jobs.map(job => (
+                  {filteredJobs.map(job => (
                     <div key={job.id} style={{ ...card, padding: '24px' }}>
                       <div className="flex items-start justify-between gap-6">
                         <div className="flex-1 min-w-0">
@@ -666,6 +683,20 @@ export default function DashboardPage() {
                         <div className="flex items-center gap-2 shrink-0">
                           <span className="text-xs font-medium px-2.5 py-1 rounded-lg"
                             style={{ background: '#F0FDF4', color: '#15803D' }}>Matched</span>
+                          {c.cv_s3_key && (
+                            <button
+                              onClick={async () => {
+                                const res = await fetch(`${FILE_URL}/cv/${c.phone}/latest/download`);
+                                if (res.ok) {
+                                  const data = await res.json();
+                                  window.open(data.download_url, '_blank');
+                                }
+                              }}
+                              className="flex items-center gap-1 text-xs font-medium"
+                              style={{ padding: '6px 10px', background: 'var(--bg-sunken)', borderRadius: '8px', color: 'var(--text-secondary)' }}>
+                              <Download size={12} />CV
+                            </button>
+                          )}
                         </div>
                       </div>
                     </div>

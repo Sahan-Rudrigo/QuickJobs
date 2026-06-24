@@ -2,7 +2,7 @@
 
 import '@/lib/amplify';
 import { useState, useEffect } from 'react';
-import { signIn, confirmSignIn } from 'aws-amplify/auth';
+import { signIn, confirmSignIn, resetPassword, confirmResetPassword } from 'aws-amplify/auth';
 import { useRouter } from 'next/navigation';
 import { Eye, EyeOff, AlertCircle } from 'lucide-react';
 
@@ -39,6 +39,10 @@ export default function LoginPage() {
   const [newPassword, setNewPassword]                 = useState('');
   const [companyName, setCompanyName]                 = useState('');
   const [requiresNewPassword, setRequiresNewPassword] = useState(false);
+  const [forgotMode, setForgotMode]                   = useState(false);
+  const [resetCodeSent, setResetCodeSent]             = useState(false);
+  const [resetCode, setResetCode]                     = useState('');
+  const [newPasswordReset, setNewPasswordReset]       = useState('');
   const [error, setError]                             = useState('');
   const [loading, setLoading]                         = useState(false);
   const [fieldIndex, setFieldIndex]                   = useState(0);
@@ -71,6 +75,29 @@ export default function LoginPage() {
       router.push('/dashboard');
     } catch (err: any) {
       setError(err.message || 'Failed to set new password.');
+    } finally { setLoading(false); }
+  };
+
+  const handleForgotRequest = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true); setError('');
+    try {
+      await resetPassword({ username: email });
+      setResetCodeSent(true);
+    } catch (err: any) {
+      setError(err.message || 'Could not send reset code.');
+    } finally { setLoading(false); }
+  };
+
+  const handleForgotConfirm = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true); setError('');
+    try {
+      await confirmResetPassword({ username: email, confirmationCode: resetCode, newPassword: newPasswordReset });
+      setForgotMode(false); setResetCodeSent(false);
+      setError('');
+    } catch (err: any) {
+      setError(err.message || 'Could not reset password.');
     } finally { setLoading(false); }
   };
 
@@ -166,13 +193,36 @@ export default function LoginPage() {
               {error && <ErrorBox message={error} />}
               <SubmitBtn loading={loading} label="Set Password & Continue" />
             </form>
+          ) : forgotMode ? (
+            <div className="animate-reveal-up" style={{ animationDelay: '0.1s', opacity: 0 }}>
+              {!resetCodeSent ? (
+                <form onSubmit={handleForgotRequest} className="space-y-4">
+                  <p className="text-sm mb-4" style={{ color: 'var(--text-secondary)' }}>Enter your email to receive a reset code.</p>
+                  <Field label="Email address" type="email" value={email} onChange={setEmail} placeholder="you@company.com" />
+                  {error && <ErrorBox message={error} />}
+                  <SubmitBtn loading={loading} label="Send Reset Code" />
+                  <button type="button" onClick={() => { setForgotMode(false); setError(''); }} className="w-full text-sm mt-2" style={{ color: 'var(--text-secondary)' }}>← Back to Sign In</button>
+                </form>
+              ) : (
+                <form onSubmit={handleForgotConfirm} className="space-y-4">
+                  <p className="text-sm mb-4" style={{ color: 'var(--text-secondary)' }}>Check your email for the reset code.</p>
+                  <Field label="Reset Code" value={resetCode} onChange={setResetCode} placeholder="6-digit code" />
+                  <Field label="New Password" type={showPassword ? 'text' : 'password'} value={newPasswordReset} onChange={setNewPasswordReset}
+                    placeholder="Minimum 8 characters" minLength={8}
+                    suffix={<EyeToggle show={showPassword} onToggle={() => setShowPassword(v => !v)} />} />
+                  {error && <ErrorBox message={error} />}
+                  <SubmitBtn loading={loading} label="Reset Password" />
+                  <button type="button" onClick={() => { setForgotMode(false); setResetCodeSent(false); setError(''); }} className="w-full text-sm mt-2" style={{ color: 'var(--text-secondary)' }}>← Back to Sign In</button>
+                </form>
+              )}
+            </div>
           ) : (
             <form onSubmit={handleLogin} className="space-y-4 animate-reveal-up" style={{ animationDelay: '0.1s', opacity: 0 }}>
               <Field label="Email address" type="email" value={email} onChange={setEmail} placeholder="you@company.com" />
               <Field label="Password" type={showPassword ? 'text' : 'password'} value={password} onChange={setPassword}
                 placeholder="Enter your password"
                 suffix={<EyeToggle show={showPassword} onToggle={() => setShowPassword(v => !v)} />}
-                action={<button type="button" className="text-xs font-medium" style={{ color: 'var(--accent-1)' }}>Forgot password?</button>} />
+                action={<button type="button" onClick={() => { setForgotMode(true); setError(''); }} className="text-xs font-medium" style={{ color: 'var(--accent-1)' }}>Forgot password?</button>} />
               {error && <ErrorBox message={error} />}
               <SubmitBtn loading={loading} label="Sign In" />
             </form>
@@ -184,10 +234,10 @@ export default function LoginPage() {
             <div className="flex-1 h-px" style={{ background: 'var(--border-subtle)' }} />
           </div>
 
-          {!requiresNewPassword && (
+          {!requiresNewPassword && !forgotMode && (
             <p className="text-center text-xs mt-4" style={{ color: 'var(--text-tertiary)' }}>
               No account?{' '}
-              <span className="font-medium" style={{ color: 'var(--text-secondary)' }}>Contact your administrator</span>
+              <a href="/register" className="font-medium" style={{ color: 'var(--accent-1)' }}>Register your company</a>
             </p>
           )}
         </div>

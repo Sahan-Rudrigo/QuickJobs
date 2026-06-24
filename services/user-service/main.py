@@ -1,3 +1,4 @@
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -8,6 +9,8 @@ from routes import router
 from redis_client import ping as redis_ping
 
 load_dotenv()
+
+ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",")]
 
 
 @asynccontextmanager
@@ -56,7 +59,7 @@ app = FastAPI(
 # Allow requests from frontend (Next.js dashboards)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production restrict to your Vercel URLs
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

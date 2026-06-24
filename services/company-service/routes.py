@@ -1,9 +1,13 @@
 import uuid
 import httpx
 import os
+import boto3
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
 from typing import List, Optional
+
+COGNITO_POOL_ID = os.getenv("COGNITO_POOL_ID", "ap-south-1_0qt4DZnx6")
+COGNITO_REGION  = os.getenv("COGNITO_REGION",  "ap-south-1")
 
 from database import get_db
 from models import Company, Job, JobMatch
@@ -14,6 +18,7 @@ from schemas import (
     AdminStats,
 )
 from sqs_publisher import publish_job_matched
+from auth import require_admin, require_employer, get_token_payload
 
 router = APIRouter()
 
@@ -43,8 +48,25 @@ def _call_matching_service(job_id: str, title: str, skills: list, description: s
     return []
 
 
+def _embed_job_in_pinecone(job_id: str, title: str, skills: list, description: str) -> None:
+    """Store job vector in Pinecone for reverse candidate-to-job matching."""
+    try:
+        httpx.post(
+            f"{MATCHING_SERVICE_URL}/embed/job",
+            json={
+                "job_id":      job_id,
+                "title":       title,
+                "skills":      skills,
+                "description": description or "",
+            },
+            timeout=15,
+        )
+    except Exception as e:
+        print(f"[WARN] Could not store job vector: {e}")
+
+
 def _fetch_candidate_profile(phone: str) -> Optional[CandidateProfile]:
-    """Fetch a single user profile from user service. Returns None on failure."""
+    """Fetch a single user profile from user service. Returns minimal profile on failure."""
     try:
         resp = httpx.get(f"{USER_SERVICE_URL}/users/{phone}", timeout=5)
         if resp.status_code == 200:
@@ -79,7 +101,6 @@ def create_or_get_company(payload: CompanyCreate, db: Session = Depends(get_db))
         if existing:
             return existing
 
-    # Also guard against duplicate email
     by_email = db.query(Company).filter(Company.email == payload.email).first()
     if by_email:
         return by_email
@@ -118,18 +139,25 @@ def get_company(company_id: str, db: Session = Depends(get_db)):
 # ── Job endpoints (employer) ──────────────────────────────────────────────────
 
 @router.post("/companies/{company_id}/jobs", response_model=JobResponse)
-def post_job(company_id: str, payload: JobCreate, db: Session = Depends(get_db)):
+def post_job(
+    company_id: str,
+    payload: JobCreate,
+    db: Session = Depends(get_db),
+    _payload: dict = Depends(require_employer),
+):
     """
-    Post a new job listing for a company.
-    Flow:
-    1. Create job in DB
-    2. Call Matching Service to find candidates
-    3. Store matched phones in job_matches table
-    4. Publish job-matched event to SQS → Notification Service sends WhatsApp alerts
+    Post a new job listing.
+    Flow: create → embed vector → match candidates → SQS notification
+    Only APPROVED companies may post jobs.
     """
     company = db.query(Company).filter(Company.id == company_id).first()
     if not company:
         raise HTTPException(status_code=404, detail="Company not found")
+    if company.status != "APPROVED":
+        raise HTTPException(
+            status_code=403,
+            detail=f"Company is {company.status}. Only APPROVED companies can post jobs.",
+        )
 
     job_id = str(uuid.uuid4())
     job = Job(
@@ -149,7 +177,15 @@ def post_job(company_id: str, payload: JobCreate, db: Session = Depends(get_db))
     db.commit()
     db.refresh(job)
 
-    # Trigger matching asynchronously (best-effort — job is already created)
+    # Store job vector for reverse matching (best-effort)
+    _embed_job_in_pinecone(
+        job_id=job_id,
+        title=payload.title,
+        skills=payload.skills or [],
+        description=payload.description or "",
+    )
+
+    # Find matching candidates
     matched_phones = _call_matching_service(
         job_id=job_id,
         title=payload.title,
@@ -207,19 +243,21 @@ def delete_job(job_id: str, db: Session = Depends(get_db)):
     db.query(JobMatch).filter(JobMatch.job_id == job_id).delete()
     db.delete(job)
     db.commit()
+    try:
+        httpx.delete(f"{MATCHING_SERVICE_URL}/embed/job/{job_id}", timeout=10)
+    except Exception as e:
+        print(f"[WARN] Could not delete job vector from Pinecone: {e}")
     return {"message": f"Job {job_id} deleted"}
 
 
 @router.get("/jobs/{job_id}/matches", response_model=JobMatchResponse)
 def get_job_matches(job_id: str, db: Session = Depends(get_db)):
-    """
-    Return matched candidates for a job with enriched profiles from user service.
-    """
+    """Return matched candidates enriched with profiles from user service."""
     match = db.query(JobMatch).filter(JobMatch.job_id == job_id).first()
     if not match:
         return JobMatchResponse(job_id=job_id, matched_phones=[], total_matches=0, candidates=[])
 
-    phones = match.matched_phones or []
+    phones     = match.matched_phones or []
     candidates = [_fetch_candidate_profile(p) for p in phones]
 
     return JobMatchResponse(
@@ -230,6 +268,39 @@ def get_job_matches(job_id: str, db: Session = Depends(get_db)):
     )
 
 
+# ── Reverse matching — called by Matching Service ─────────────────────────────
+
+from pydantic import BaseModel as _BaseModel
+
+class _ApplicantAdd(_BaseModel):
+    phone: str
+
+
+@router.post("/jobs/{job_id}/applicants")
+def add_applicant(job_id: str, payload: _ApplicantAdd, db: Session = Depends(get_db)):
+    """
+    Add a reverse-matched candidate to a job's applicant list.
+    Called by Matching Service when a new CV matches an active job.
+    Idempotent — won't add duplicates.
+    """
+    job = db.query(Job).filter(Job.id == job_id, Job.status == "Active").first()
+    if not job:
+        return {"status": "skipped", "reason": "job not found or closed"}
+
+    match = db.query(JobMatch).filter(JobMatch.job_id == job_id).first()
+    if not match:
+        match = JobMatch(job_id=job_id, matched_phones=[payload.phone])
+        db.add(match)
+    elif payload.phone in (match.matched_phones or []):
+        return {"status": "already_matched"}
+    else:
+        match.matched_phones = (match.matched_phones or []) + [payload.phone]
+
+    job.applications = len(match.matched_phones)
+    db.commit()
+    return {"status": "added", "job_id": job_id, "phone": payload.phone}
+
+
 # ── Admin endpoints ───────────────────────────────────────────────────────────
 
 @router.get("/admin/companies", response_model=List[CompanyResponse])
@@ -238,8 +309,9 @@ def admin_list_companies(
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
+    _: dict = Depends(require_admin),
 ):
-    """List all companies with optional status filter. For the admin panel."""
+    """List all companies with optional status filter."""
     q = db.query(Company)
     if status:
         q = q.filter(Company.status == status)
@@ -247,7 +319,11 @@ def admin_list_companies(
 
 
 @router.patch("/admin/companies/{company_id}/approve", response_model=CompanyResponse)
-def approve_company(company_id: str, db: Session = Depends(get_db)):
+def approve_company(
+    company_id: str,
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_admin),
+):
     company = db.query(Company).filter(Company.id == company_id).first()
     if not company:
         raise HTTPException(status_code=404, detail="Company not found")
@@ -258,11 +334,63 @@ def approve_company(company_id: str, db: Session = Depends(get_db)):
 
 
 @router.patch("/admin/companies/{company_id}/reject", response_model=CompanyResponse)
-def reject_company(company_id: str, db: Session = Depends(get_db)):
+def reject_company(
+    company_id: str,
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_admin),
+):
     company = db.query(Company).filter(Company.id == company_id).first()
     if not company:
         raise HTTPException(status_code=404, detail="Company not found")
     company.status = "REJECTED"
+    db.commit()
+    db.refresh(company)
+    return company
+
+
+@router.patch("/admin/companies/{company_id}/activate", response_model=CompanyResponse)
+def activate_company(
+    company_id: str,
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_admin),
+):
+    """
+    Approve a self-registered company AND add the employer to the
+    quickjobs-employers Cognito group so they can log in immediately.
+    Falls back to status-only approval if Cognito assignment fails.
+    """
+    company = db.query(Company).filter(Company.id == company_id).first()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    try:
+        cognito = boto3.client("cognito-idp", region_name=COGNITO_REGION)
+        cognito.admin_add_user_to_group(
+            UserPoolId=COGNITO_POOL_ID,
+            Username=company.email,
+            GroupName="quickjobs-employers",
+        )
+        print(f"[INFO] Added {company.email} to quickjobs-employers Cognito group")
+    except Exception as e:
+        print(f"[WARN] Cognito group assignment failed (activate manually if needed): {e}")
+
+    company.status = "APPROVED"
+    db.commit()
+    db.refresh(company)
+    return company
+
+
+@router.patch("/admin/companies/{company_id}/suspend", response_model=CompanyResponse)
+def suspend_company(
+    company_id: str,
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_admin),
+):
+    """Suspend a company. Their jobs remain but they cannot post new listings."""
+    company = db.query(Company).filter(Company.id == company_id).first()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+    company.status = "SUSPENDED"
     db.commit()
     db.refresh(company)
     return company
@@ -273,8 +401,9 @@ def admin_list_jobs(
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
+    _: dict = Depends(require_admin),
 ):
-    """List all jobs across all companies. For the admin panel."""
+    """List all jobs across all companies."""
     return (
         db.query(Job)
         .order_by(Job.posted_at.desc())
@@ -283,10 +412,13 @@ def admin_list_jobs(
 
 
 @router.get("/admin/stats", response_model=AdminStats)
-def admin_stats(db: Session = Depends(get_db)):
+def admin_stats(
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_admin),
+):
     """Platform-wide KPIs for the admin panel overview."""
     all_companies = db.query(Company).all()
-    all_jobs = db.query(Job).all()
+    all_jobs      = db.query(Job).all()
     total_matches = db.query(JobMatch).count()
 
     return AdminStats(

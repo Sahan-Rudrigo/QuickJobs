@@ -6,6 +6,7 @@ from database import get_db
 from models import User
 from schemas import UserCreate, UserUpdate, UserResponse, OptStatusResponse
 from redis_client import set_opt_in_status, delete_opt_in_status
+from auth import require_admin
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
@@ -234,7 +235,8 @@ def opt_in(phone: str, db: Session = Depends(get_db)):
 def get_all_users(
     skip: int = 0,
     limit: int = 50,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _: dict = Depends(require_admin),
 ):
     """
     Get all users with pagination.

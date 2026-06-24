@@ -22,11 +22,22 @@ GRAPH_URL             = "https://graph.facebook.com/v18.0"
 
 _redis = redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379"), decode_responses=True)
 
+_DEDUP_TTL = 60 * 60 * 24 * 7  # 7 days — prevents re-notifying same candidate for same job
+
 
 def _is_opted_in(phone: str) -> bool:
     """Check Redis opt-in cache. Defaults to True if key is missing."""
-    val = _redis.get(f"opt_in:{phone}")
-    return val != "false"
+    return _redis.get(f"opt_in:{phone}") != "false"
+
+
+def _already_notified(job_id: str, phone: str) -> bool:
+    """Return True if this candidate was already notified for this job."""
+    return bool(_redis.get(f"notified:{job_id}:{phone}"))
+
+
+def _mark_notified(job_id: str, phone: str) -> None:
+    """Record that this candidate was notified. Expires after 7 days."""
+    _redis.setex(f"notified:{job_id}:{phone}", _DEDUP_TTL, "1")
 
 
 def _build_message(job_title: str, company_name: str, location: str, job_type: str, salary: str) -> str:
@@ -75,31 +86,42 @@ def _send_whatsapp(to: str, message: str) -> bool:
 def process_job_matched(body: dict) -> None:
     """
     Handle a job-matched event from SQS.
-    Sends a WhatsApp notification to every opted-in matched candidate.
+    Sends a WhatsApp notification to every opted-in, not-yet-notified candidate.
     """
-    job_id        = body.get("job_id", "")
-    job_title     = body.get("job_title", "Job Opportunity")
-    company_name  = body.get("company_name", "")
-    location      = body.get("location", "")
-    job_type      = body.get("job_type", "")
-    salary        = body.get("salary", "")
-    phones        = body.get("matched_phones", [])
+    job_id       = body.get("job_id", "")
+    job_title    = body.get("job_title", "Job Opportunity")
+    company_name = body.get("company_name", "")
+    location     = body.get("location", "")
+    job_type     = body.get("job_type", "")
+    salary       = body.get("salary", "")
+    phones       = body.get("matched_phones", [])
 
     if not phones:
         print(f"[INFO] No matched phones for job {job_id}")
         return
 
     message = _build_message(job_title, company_name, location, job_type, salary)
-    sent = 0
+    sent = skipped_opted_out = skipped_duplicate = 0
 
     for phone in phones:
-        if _is_opted_in(phone):
-            if _send_whatsapp(phone, message):
-                sent += 1
-        else:
-            print(f"[INFO] Skipping {phone} — opted out")
+        if not _is_opted_in(phone):
+            skipped_opted_out += 1
+            continue
 
-    print(f"[INFO] Job {job_id}: notified {sent}/{len(phones)} candidates")
+        if _already_notified(job_id, phone):
+            skipped_duplicate += 1
+            continue
+
+        if _send_whatsapp(phone, message):
+            _mark_notified(job_id, phone)
+            sent += 1
+
+    print(
+        f"[INFO] Job {job_id}: sent={sent} "
+        f"opted_out={skipped_opted_out} "
+        f"duplicate={skipped_duplicate} "
+        f"total={len(phones)}"
+    )
 
 
 def poll_job_matched_queue() -> None:
