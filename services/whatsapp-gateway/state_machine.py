@@ -1,3 +1,5 @@
+import os
+import httpx
 from redis_client import get_state, set_state
 from whatsapp_api import send_text
 import templates
@@ -12,6 +14,11 @@ UPDATE_FIELD_MAP = {
     "5": None,
 }
 
+USER_SERVICE_URL = os.getenv("USER_SERVICE_URL", "http://localhost:8001")
+FILE_SERVICE_URL = os.getenv("FILE_SERVICE_URL", "http://localhost:8002")
+
+_DELETE_KEYWORDS = {"DELETE MY DATA", "DELETE DATA", "ERASE MY DATA", "ERASE DATA"}
+
 
 def _parse_salary(text: str):
     """Return (salary_min, salary_max) from 'min-max' string, or (None, None)."""
@@ -24,13 +31,56 @@ def _parse_salary(text: str):
     return None, None
 
 
+async def _create_user_profile(phone: str, data: dict) -> None:
+    """Create user profile in User Service after onboarding completes."""
+    payload = {
+        "phone":            phone,
+        "name":             data.get("name"),
+        "skills":           data.get("skills", []),
+        "experience_level": data.get("experience_level"),
+        "location":         data.get("location"),
+        "salary_min":       data.get("salary_min"),
+        "salary_max":       data.get("salary_max"),
+        "opt_in_status":    True,
+        "onboarding_state": "ACTIVE",
+        "availability":     "actively_looking",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(f"{USER_SERVICE_URL}/users", json=payload)
+            if resp.status_code == 400:
+                await client.patch(f"{USER_SERVICE_URL}/users/{phone}", json=payload)
+        print(f"[INFO] User profile created/updated for {phone}")
+    except Exception as e:
+        print(f"[ERROR] Failed to create user profile for {phone}: {e}")
+
+
+async def _delete_user_data(phone: str) -> None:
+    """
+    PDPA right-to-erasure: delete all data for a phone number across services.
+    Calls user-service (profile) and file-service (CVs) in parallel.
+    Failures are logged but do not block the flow.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            user_del = client.delete(f"{USER_SERVICE_URL}/users/{phone}")
+            cv_del   = client.delete(f"{FILE_SERVICE_URL}/cv/{phone}")
+            import asyncio
+            results = await asyncio.gather(user_del, cv_del, return_exceptions=True)
+            for i, r in enumerate(results):
+                if isinstance(r, Exception):
+                    print(f"[WARN] Deletion request {i} failed: {r}")
+    except Exception as e:
+        print(f"[ERROR] Failed to complete data deletion for {phone}: {e}")
+
+
 async def handle_message(phone: str, text: str):
     state = get_state(phone)
     step  = state["step"]
     data  = state["data"]
     text  = text.strip()
 
-    # Global overrides — work in any state
+    # ── Global overrides ─────────────────────────────────────────
     if text.upper() == "STOP":
         set_state(phone, "OPTED_OUT", data)
         await send_text(phone, templates.OPT_OUT_CONFIRM)
@@ -39,6 +89,23 @@ async def handle_message(phone: str, text: str):
     if text.upper() == "START":
         set_state(phone, "ACTIVE", data)
         await send_text(phone, templates.OPT_IN_CONFIRM)
+        return
+
+    # PDPA deletion request — available from any state
+    if text.upper() in _DELETE_KEYWORDS:
+        set_state(phone, "CONFIRMING_DELETE", data)
+        await send_text(phone, templates.ASK_DELETE_CONFIRM)
+        return
+
+    # ── Deletion confirmation state ───────────────────────────────
+    if step == "CONFIRMING_DELETE":
+        if text.upper() == "CONFIRM DELETE":
+            await _delete_user_data(phone)
+            set_state(phone, "IDLE", {})
+            await send_text(phone, templates.DATA_DELETED_CONFIRM)
+        else:
+            set_state(phone, "ACTIVE" if data else "IDLE", data)
+            await send_text(phone, templates.DATA_DELETE_CANCELLED)
         return
 
     # ── Onboarding flow ──────────────────────────────────────────
@@ -84,46 +151,43 @@ async def handle_message(phone: str, text: str):
 
     elif step == "AWAITING_CV":
         if text == "__CV_UPLOADED__":
+            await _create_user_profile(phone, data)
             set_state(phone, "ACTIVE", data)
             await send_text(phone, templates.onboarding_complete(data.get("name", "")))
-        # If user sends text instead of a file, remind them
         else:
             await send_text(phone, templates.ASK_CV)
 
     # ── Active user menu ─────────────────────────────────────────
 
     elif step == "ACTIVE":
-        choice = UPDATE_FIELD_MAP.get(text)
-        if text == "5" or choice is None and text not in UPDATE_FIELD_MAP:
-            if text == "5":
-                # Opt out
-                set_state(phone, "OPTED_OUT", data)
-                await send_text(phone, templates.OPT_OUT_CONFIRM)
-            else:
-                await send_text(phone, templates.ACTIVE_MENU)
-        elif choice is not None:
-            field, next_step = choice
+        if text == "5":
+            set_state(phone, "OPTED_OUT", data)
+            await send_text(phone, templates.OPT_OUT_CONFIRM)
+        elif text in UPDATE_FIELD_MAP and UPDATE_FIELD_MAP[text] is not None:
+            field, next_step = UPDATE_FIELD_MAP[text]
             data["_updating_field"] = field
             set_state(phone, next_step, data)
             msg_map = {
-                "UPDATING_SKILLS":   templates.ASK_NEW_SKILLS,
-                "UPDATING_LOCATION": templates.ASK_NEW_LOCATION,
-                "UPDATING_SALARY":   templates.ASK_NEW_SALARY,
+                "UPDATING_SKILLS":    templates.ASK_NEW_SKILLS,
+                "UPDATING_LOCATION":  templates.ASK_NEW_LOCATION,
+                "UPDATING_SALARY":    templates.ASK_NEW_SALARY,
                 "AWAITING_CV_UPDATE": templates.ASK_NEW_CV,
             }
             await send_text(phone, msg_map[next_step])
+        else:
+            await send_text(phone, templates.ACTIVE_MENU)
 
     # ── Profile update states ─────────────────────────────────────
 
     elif step == "UPDATING_SKILLS":
         new_skills = [s.strip() for s in text.split(",") if s.strip()]
-        data["_pending_value"] = new_skills
+        data["_pending_value"]   = new_skills
         data["_pending_display"] = ", ".join(new_skills)
         set_state(phone, "CONFIRMING_UPDATE", data)
         await send_text(phone, templates.confirm_update("Skills", data["_pending_display"]))
 
     elif step == "UPDATING_LOCATION":
-        data["_pending_value"] = text
+        data["_pending_value"]   = text
         data["_pending_display"] = text
         set_state(phone, "CONFIRMING_UPDATE", data)
         await send_text(phone, templates.confirm_update("Location", text))
@@ -133,7 +197,7 @@ async def handle_message(phone: str, text: str):
         if sal_min is None:
             await send_text(phone, templates.INVALID_SALARY)
             return
-        data["_pending_value"] = {"salary_min": sal_min, "salary_max": sal_max}
+        data["_pending_value"]   = {"salary_min": sal_min, "salary_max": sal_max}
         data["_pending_display"] = f"LKR {sal_min:,} – {sal_max:,}"
         set_state(phone, "CONFIRMING_UPDATE", data)
         await send_text(phone, templates.confirm_update("Salary", data["_pending_display"]))
@@ -147,9 +211,10 @@ async def handle_message(phone: str, text: str):
 
     elif step == "CONFIRMING_UPDATE":
         if text.upper() == "YES":
-            field = data.get("_updating_field")
-            value = data.get("_pending_value")
-            # Apply the update to the stored data
+            field   = data.get("_updating_field")
+            value   = data.get("_pending_value")
+            display = data.pop("_pending_display", field)
+
             if field == "skills":
                 data["skills"] = value
             elif field == "location":
@@ -157,12 +222,19 @@ async def handle_message(phone: str, text: str):
             elif field == "salary":
                 data["salary_min"] = value["salary_min"]
                 data["salary_max"] = value["salary_max"]
-            # Clean temp keys
+
             data.pop("_updating_field", None)
             data.pop("_pending_value", None)
-            display = data.pop("_pending_display", field)
+
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    await client.patch(f"{USER_SERVICE_URL}/users/{phone}", json={field: value})
+            except Exception as e:
+                print(f"[ERROR] Failed to sync update to User Service: {e}")
+
             set_state(phone, "ACTIVE", data)
             await send_text(phone, templates.update_saved(display))
+
         elif text.upper() == "NO":
             data.pop("_updating_field", None)
             data.pop("_pending_value", None)
@@ -170,9 +242,9 @@ async def handle_message(phone: str, text: str):
             set_state(phone, "ACTIVE", data)
             await send_text(phone, templates.UPDATE_CANCELLED)
         else:
-            field = data.get("_updating_field", "field")
+            field   = data.get("_updating_field", "field")
             display = data.get("_pending_display", "")
             await send_text(phone, templates.confirm_update(field, display))
 
     elif step == "OPTED_OUT":
-        await send_text(phone, "You are currently unsubscribed. Send *START* to re-subscribe.")
+        await send_text(phone, "You are unsubscribed. Send *START* to re-subscribe.")

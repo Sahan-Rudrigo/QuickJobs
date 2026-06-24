@@ -32,6 +32,103 @@ services:
       timeout: 5s
       retries: 5
 
+  # ── Application services ────────────────────────────────────────────────────
+  # Service-to-service URLs override the localhost values from each .env file.
+  # AWS credentials and external API keys are loaded from each service's .env.
+
+  user-service:
+    build:
+      context: ../services/user-service
+    container_name: quickjobs-user-service
+    env_file: ../services/user-service/.env
+    environment:
+      - DATABASE_URL=postgresql://admin:password123@postgres:5432/quickjobs
+      - REDIS_URL=redis://redis:6379
+    ports:
+      - "8001:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  file-service:
+    build:
+      context: ../services/file-service
+    container_name: quickjobs-file-service
+    env_file: ../services/file-service/.env
+    environment:
+      - DATABASE_URL=postgresql://admin:password123@postgres:5432/quickjobs
+    ports:
+      - "8002:8002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  company-service:
+    build:
+      context: ../services/company-service
+    container_name: quickjobs-company-service
+    env_file: ../services/company-service/.env
+    environment:
+      - DATABASE_URL=postgresql://admin:password123@postgres:5432/quickjobs
+      - MATCHING_SERVICE_URL=http://matching-service:8004
+      - USER_SERVICE_URL=http://user-service:8001
+      - SKIP_AUTH=false
+    ports:
+      - "8003:8003"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  matching-service:
+    build:
+      context: ../services/matching-service
+    container_name: quickjobs-matching-service
+    env_file: ../services/matching-service/.env
+    environment:
+      - COMPANY_SERVICE_URL=http://company-service:8003
+    ports:
+      - "8004:8004"
+    restart: unless-stopped
+
+  notification-service:
+    build:
+      context: ../services/notification-service
+    container_name: quickjobs-notification-service
+    env_file: ../services/notification-service/.env
+    environment:
+      - REDIS_URL=redis://redis:6379
+    ports:
+      - "8005:8005"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  whatsapp-gateway:
+    build:
+      context: ../services/whatsapp-gateway
+    container_name: quickjobs-whatsapp-gateway
+    env_file: ../services/whatsapp-gateway/.env
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - USER_SERVICE_URL=http://user-service:8001
+      - FILE_SERVICE_URL=http://file-service:8002
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      user-service:
+        condition: service_started
+      file-service:
+        condition: service_started
+    restart: unless-stopped
+
 volumes:
   pgdata:
   redisdata:

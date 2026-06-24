@@ -147,6 +147,141 @@ def test_match_job_filters_below_threshold(mock_pinecone_index):
     assert response.json()["total_matches"] == 0
 
 
+# ── POST /embed/job ───────────────────────────────────────────────────
+
+def test_embed_job_success(mock_pinecone_index):
+    response = client.post("/embed/job", json={
+        "job_id": "job_001",
+        "title": "Python Developer",
+        "skills": ["Python", "FastAPI"],
+        "description": "We need a Python developer.",
+    })
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "success"
+    assert data["job_id"] == "job_001"
+    mock_pinecone_index.upsert.assert_called()
+
+
+def test_embed_job_pinecone_error(mock_pinecone_index):
+    mock_pinecone_index.upsert.side_effect = Exception("Pinecone unavailable")
+    response = client.post("/embed/job", json={
+        "job_id": "job_002",
+        "title": "React Developer",
+        "skills": ["React"],
+        "description": "Frontend role",
+    })
+    assert response.status_code == 500
+
+
+# ── DELETE /embed/job/{job_id} ────────────────────────────────────────
+
+def test_delete_job_embedding(mock_pinecone_index):
+    response = client.delete("/embed/job/job_to_delete")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "deleted"
+    assert data["job_id"] == "job_to_delete"
+    mock_pinecone_index.delete.assert_called_once_with(ids=["job_job_to_delete"])
+
+
+# ── POST /match/candidate ─────────────────────────────────────────────
+
+def test_match_candidate_no_results(mock_pinecone_index):
+    mock_pinecone_index.query.return_value = MagicMock(matches=[])
+    response = client.post("/match/candidate", json={
+        "phone": "94771234567",
+        "skills": ["Python"],
+        "experience": "mid",
+        "full_text": "Python developer with 3 years experience.",
+    })
+    assert response.status_code == 200
+    data = response.json()
+    assert data["phone"] == "94771234567"
+    assert data["matched_job_ids"] == []
+    assert data["total_matches"] == 0
+
+
+def test_match_candidate_with_matching_job(mock_pinecone_index):
+    fake_match = MagicMock()
+    fake_match.score = 0.82
+    fake_match.metadata = {"job_id": "job_abc", "type": "job"}
+    mock_pinecone_index.query.return_value = MagicMock(matches=[fake_match])
+
+    response = client.post("/match/candidate", json={
+        "phone": "94771234567",
+        "skills": ["Python", "Django"],
+        "experience": "senior",
+        "full_text": "Senior Python engineer with Django experience.",
+    })
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total_matches"] == 1
+    assert "job_abc" in data["matched_job_ids"]
+
+
+def test_match_candidate_excludes_candidate_vectors(mock_pinecone_index):
+    """Candidate vectors (no job_id in metadata) must not appear in job matches."""
+    candidate_vector = MagicMock()
+    candidate_vector.score = 0.90
+    candidate_vector.metadata = {"phone": "94779999999"}
+    mock_pinecone_index.query.return_value = MagicMock(matches=[candidate_vector])
+
+    response = client.post("/match/candidate", json={
+        "phone": "94771234567",
+        "skills": ["Python"],
+        "experience": "junior",
+        "full_text": "Junior Python dev.",
+    })
+    assert response.status_code == 200
+    assert response.json()["total_matches"] == 0
+
+
+def test_match_candidate_filters_below_threshold(mock_pinecone_index):
+    """Jobs scoring below REVERSE_SIMILARITY_THRESHOLD (0.70) must be excluded."""
+    low_job = MagicMock()
+    low_job.score = 0.55
+    low_job.metadata = {"job_id": "job_low", "type": "job"}
+    mock_pinecone_index.query.return_value = MagicMock(matches=[low_job])
+
+    response = client.post("/match/candidate", json={
+        "phone": "94771234567",
+        "skills": ["Python"],
+        "experience": "mid",
+        "full_text": "Some experience.",
+    })
+    assert response.status_code == 200
+    assert response.json()["total_matches"] == 0
+
+
+def test_match_candidate_multiple_jobs(mock_pinecone_index):
+    """Multiple above-threshold job matches are all returned."""
+    def _job(job_id, score):
+        m = MagicMock()
+        m.score = score
+        m.metadata = {"job_id": job_id, "type": "job"}
+        return m
+
+    mock_pinecone_index.query.return_value = MagicMock(matches=[
+        _job("job_1", 0.95),
+        _job("job_2", 0.80),
+        _job("job_3", 0.55),  # below threshold
+    ])
+
+    response = client.post("/match/candidate", json={
+        "phone": "94771234567",
+        "skills": ["Python", "AWS"],
+        "experience": "mid",
+        "full_text": "Cloud developer with Python and AWS skills.",
+    })
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total_matches"] == 2
+    assert "job_1" in data["matched_job_ids"]
+    assert "job_2" in data["matched_job_ids"]
+    assert "job_3" not in data["matched_job_ids"]
+
+
 # ── GET /index/stats ──────────────────────────────────────────────────
 
 def test_index_stats(mock_pinecone_index):

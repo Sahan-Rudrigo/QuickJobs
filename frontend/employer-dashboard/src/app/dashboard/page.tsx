@@ -2,27 +2,38 @@
 
 import '@/lib/amplify';
 import { useEffect, useState } from 'react';
-import { getCurrentUser, signOut, fetchUserAttributes } from 'aws-amplify/auth';
+import { getCurrentUser, signOut, fetchUserAttributes, fetchAuthSession } from 'aws-amplify/auth';
 import { useRouter } from 'next/navigation';
 import {
   LayoutDashboard, PlusCircle, Briefcase, Users, LogOut,
   Bell, Search, TrendingUp, MapPin, Clock, DollarSign,
   Calendar, Trash2, RefreshCw, ChevronRight, Menu, X,
+  AlertCircle, CheckCircle, Download,
 } from 'lucide-react';
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, Legend,
 } from 'recharts';
 
+const COMPANY_URL  = process.env.NEXT_PUBLIC_COMPANY_SERVICE_URL || 'http://localhost:8003';
+const FILE_URL     = process.env.NEXT_PUBLIC_FILE_SERVICE_URL    || 'http://localhost:8002';
+
 type Job = {
-  id: string; title: string; company: string; location: string;
-  type: string; salary: string; description: string; skills: string;
-  deadline: string; postedAt: string; applications: number;
-  status: 'Active' | 'Closed';
+  id: string; company_id: string; company_name: string; title: string;
+  location: string; job_type: string; salary: string; description: string;
+  skills: string[]; deadline: string; posted_at: string;
+  applications: number; status: 'Active' | 'Closed';
 };
 
+type Candidate = {
+  phone: string; name: string | null; skills: string[];
+  experience_level: string | null; location: string | null; cv_s3_key: string | null;
+};
+
+type Company = { id: string; name: string; email: string; status: string; };
+
 const emptyForm = {
-  title: '', company: '', location: '', type: 'Full-time',
+  title: '', location: '', job_type: 'Full-time',
   salary: '', description: '', skills: '', deadline: '',
 };
 
@@ -41,54 +52,155 @@ const card: React.CSSProperties = {
 
 export default function DashboardPage() {
   const router = useRouter();
-  const [userEmail, setUserEmail]     = useState('');
-  const [companyName, setCompanyName] = useState('');
-  const [view, setView]               = useState('Overview');
-  const [jobs, setJobs]               = useState<Job[]>([]);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [form, setForm]               = useState(emptyForm);
-  const [posting, setPosting]         = useState(false);
-  const [postSuccess, setPostSuccess] = useState(false);
+
+  const [userEmail, setUserEmail]       = useState('');
+  const [company, setCompany]           = useState<Company | null>(null);
+  const [view, setView]                 = useState('Overview');
+  const [jobs, setJobs]                 = useState<Job[]>([]);
+  const [sidebarOpen, setSidebarOpen]   = useState(true);
+  const [form, setForm]                 = useState(emptyForm);
+  const [posting, setPosting]           = useState(false);
+  const [postSuccess, setPostSuccess]   = useState(false);
+  const [initLoading, setInitLoading]   = useState(true);
+  const [jobsLoading, setJobsLoading]   = useState(false);
+
+  const [jobSearch, setJobSearch] = useState('');
+
+  // Applicants tab state
+  const [selectedJobId, setSelectedJobId]   = useState('');
+  const [candidates, setCandidates]         = useState<Candidate[]>([]);
+  const [candidatesLoading, setCandidatesLoading] = useState(false);
 
   useEffect(() => {
-    getCurrentUser()
-      .then(async u => {
+    async function init() {
+      try {
+        const u = await getCurrentUser();
         setUserEmail(u.username);
+
+        // Cognito group check
+        const session = await fetchAuthSession();
+        const groups = (session.tokens?.accessToken?.payload['cognito:groups'] as string[]) || [];
+        if (!groups.includes('quickjobs-employers')) {
+          router.push('/login');
+          return;
+        }
+
         const attrs = await fetchUserAttributes();
-        setCompanyName(attrs.name || u.username.split('@')[0]);
-      })
-      .catch(() => router.push('/login'));
-    const saved = localStorage.getItem('quickjobs_jobs');
-    if (saved) setJobs(JSON.parse(saved));
+        const sub         = session.tokens?.accessToken?.payload['sub'] as string || u.username;
+        const companyName = attrs.name || u.username.split('@')[0];
+
+        // Find or create company record
+        let co: Company | null = null;
+        const byUser = await fetch(`${COMPANY_URL}/companies/by-user/${sub}`);
+        if (byUser.ok) {
+          co = await byUser.json();
+        } else {
+          const created = await fetch(`${COMPANY_URL}/companies`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: companyName, email: u.username, cognito_user_id: sub }),
+          });
+          if (created.ok) co = await created.json();
+        }
+
+        if (co) {
+          setCompany(co);
+          await loadJobs(co.id);
+        }
+      } catch {
+        router.push('/login');
+      } finally {
+        setInitLoading(false);
+      }
+    }
+    init();
   }, [router]);
 
-  const saveJobs = (updated: Job[]) => {
-    setJobs(updated);
-    localStorage.setItem('quickjobs_jobs', JSON.stringify(updated));
-  };
+  async function loadJobs(companyId: string) {
+    setJobsLoading(true);
+    try {
+      const res = await fetch(`${COMPANY_URL}/companies/${companyId}/jobs`);
+      if (res.ok) setJobs(await res.json());
+    } finally {
+      setJobsLoading(false);
+    }
+  }
 
   const handlePost = async (e: React.FormEvent) => {
+    if (!company) return;
     e.preventDefault();
     setPosting(true);
-    await new Promise(r => setTimeout(r, 700));
-    saveJobs([{ id: Date.now().toString(), ...form, postedAt: new Date().toISOString(), applications: 0, status: 'Active' }, ...jobs]);
-    setForm(emptyForm); setPosting(false); setPostSuccess(true);
-    setTimeout(() => { setPostSuccess(false); setView('My Jobs'); }, 1500);
+    try {
+      const res = await fetch(`${COMPANY_URL}/companies/${company.id}/jobs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title:       form.title,
+          location:    form.location,
+          job_type:    form.job_type,
+          salary:      form.salary,
+          description: form.description,
+          skills:      form.skills ? form.skills.split(',').map(s => s.trim()).filter(Boolean) : [],
+          deadline:    form.deadline || null,
+        }),
+      });
+      if (res.ok) {
+        const newJob: Job = await res.json();
+        setJobs(prev => [newJob, ...prev]);
+        setForm(emptyForm);
+        setPostSuccess(true);
+        setTimeout(() => { setPostSuccess(false); setView('My Jobs'); }, 1500);
+      }
+    } finally {
+      setPosting(false);
+    }
   };
 
-  const toggleStatus = (id: string) =>
-    saveJobs(jobs.map(j => j.id === id ? { ...j, status: j.status === 'Active' ? 'Closed' : 'Active' } : j));
-  const deleteJob = (id: string) => saveJobs(jobs.filter(j => j.id !== id));
+  const toggleStatus = async (jobId: string) => {
+    const res = await fetch(`${COMPANY_URL}/jobs/${jobId}/status`, { method: 'PATCH' });
+    if (res.ok) {
+      const updated: Job = await res.json();
+      setJobs(prev => prev.map(j => j.id === jobId ? updated : j));
+    }
+  };
 
-  const activeJobs = jobs.filter(j => j.status === 'Active').length;
-  const totalApps  = jobs.reduce((s, j) => s + j.applications, 0);
-  const jobsByType = ['Full-time', 'Part-time', 'Contract', 'Remote', 'Internship']
-    .map(t => ({ name: t, Jobs: jobs.filter(j => j.type === t).length }))
+  const deleteJob = async (jobId: string) => {
+    const res = await fetch(`${COMPANY_URL}/jobs/${jobId}`, { method: 'DELETE' });
+    if (res.ok) setJobs(prev => prev.filter(j => j.id !== jobId));
+  };
+
+  const loadCandidates = async (jobId: string) => {
+    setSelectedJobId(jobId);
+    setCandidatesLoading(true);
+    setCandidates([]);
+    try {
+      const res = await fetch(`${COMPANY_URL}/jobs/${jobId}/matches`);
+      if (res.ok) {
+        const data = await res.json();
+        setCandidates(data.candidates || []);
+      }
+    } finally {
+      setCandidatesLoading(false);
+    }
+  };
+
+  const filteredJobs = jobs.filter(j =>
+    !jobSearch ||
+    j.title.toLowerCase().includes(jobSearch.toLowerCase()) ||
+    (j.location || '').toLowerCase().includes(jobSearch.toLowerCase()) ||
+    (j.skills || []).some(s => s.toLowerCase().includes(jobSearch.toLowerCase()))
+  );
+  const activeJobs  = jobs.filter(j => j.status === 'Active').length;
+  const totalApps   = jobs.reduce((s, j) => s + j.applications, 0);
+  const jobsByType  = ['Full-time', 'Part-time', 'Contract', 'Remote', 'Internship']
+    .map(t => ({ name: t, Jobs: jobs.filter(j => j.job_type === t).length }))
     .filter(d => d.Jobs > 0);
   const pieData = [
     { name: 'Active', value: activeJobs },
     { name: 'Closed', value: jobs.length - activeJobs },
   ].filter(d => d.value > 0);
+
+  const companyName = company?.name || userEmail.split('@')[0];
 
   const navItems = [
     { name: 'Overview',   icon: <LayoutDashboard size={16} /> },
@@ -96,6 +208,19 @@ export default function DashboardPage() {
     { name: 'My Jobs',    icon: <Briefcase size={16} />       },
     { name: 'Applicants', icon: <Users size={16} />           },
   ];
+
+  if (initLoading) {
+    return (
+      <div className="flex h-screen items-center justify-center" style={{ background: 'var(--bg-base)' }}>
+        <div className="text-center">
+          <div className="w-8 h-8 mx-auto mb-3 rounded-xl flex items-center justify-center" style={{ background: 'var(--accent-1)' }}>
+            <span className="text-white font-bold text-sm">Q</span>
+          </div>
+          <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>Loading your dashboard…</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-screen overflow-hidden" style={{ background: 'var(--bg-base)' }}>
@@ -145,8 +270,7 @@ export default function DashboardPage() {
         <div className="p-2 space-y-0.5" style={{ borderTop: '1px solid var(--border-subtle)' }}>
           {sidebarOpen && companyName && (
             <div className="flex items-center gap-2.5 px-3 py-2.5 mb-1">
-              <div className="w-7 h-7 rounded-full flex items-center justify-center shrink-0"
-                style={{ background: 'var(--accent-1-soft)' }}>
+              <div className="w-7 h-7 rounded-full flex items-center justify-center shrink-0" style={{ background: 'var(--accent-1-soft)' }}>
                 <span className="text-xs font-semibold" style={{ color: 'var(--accent-1)' }}>{companyName[0]?.toUpperCase()}</span>
               </div>
               <div className="flex-1 min-w-0">
@@ -173,44 +297,41 @@ export default function DashboardPage() {
       {/* ── Main ── */}
       <div className="flex-1 flex flex-col overflow-hidden">
 
-        {/* Header */}
         <header className="flex items-center gap-4 shrink-0"
           style={{ height: '64px', padding: '0 24px', background: 'var(--bg-elevated)', borderBottom: '1px solid var(--border-subtle)' }}>
           <div className="flex items-center gap-2">
             <h1 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>{view}</h1>
             <ChevronRight size={13} style={{ color: 'var(--text-tertiary)' }} />
           </div>
-          <div className="flex-1 overflow-hidden rounded-xl hidden lg:block"
-            style={{ background: 'var(--bg-sunken)', padding: '6px 12px', maxWidth: '480px' }}>
-            <div className="flex animate-marquee whitespace-nowrap">
-              {[0, 1].map(i => (
-                <span key={i} className="text-xs inline-flex items-center gap-2.5 pr-10" style={{ color: 'var(--text-secondary)' }}>
-                  <span className="font-medium" style={{ color: 'var(--text-primary)' }}>{companyName || 'QuickJobs'}</span>
-                  <span style={{ color: 'var(--text-tertiary)' }}>▸</span>
-                  <span>{jobs.length} Jobs Posted</span>
-                  <span style={{ color: 'var(--text-tertiary)' }}>▸</span>
-                  <span>{activeJobs} Active</span>
-                  <span style={{ color: 'var(--text-tertiary)' }}>▸</span>
-                  <span>{totalApps} Applications</span>
-                  <span style={{ color: 'var(--text-tertiary)' }}>▸</span>
-                </span>
-              ))}
+
+          {/* Company status banner */}
+          {company && company.status === 'PENDING' && (
+            <div className="flex items-center gap-1.5 text-xs font-medium"
+              style={{ padding: '5px 10px', background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: '8px', color: '#92400E' }}>
+              <AlertCircle size={12} /> Account pending admin approval
             </div>
-          </div>
+          )}
+          {company && company.status === 'REJECTED' && (
+            <div className="flex items-center gap-1.5 text-xs font-medium"
+              style={{ padding: '5px 10px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: '8px', color: '#B91C1C' }}>
+              <AlertCircle size={12} /> Account rejected — contact admin
+            </div>
+          )}
+
           <div className="ml-auto flex items-center gap-2">
             <div className="hidden md:flex items-center gap-2 rounded-xl"
               style={{ background: 'var(--bg-sunken)', padding: '8px 12px' }}>
               <Search size={13} style={{ color: 'var(--text-tertiary)' }} />
-              <input className="bg-transparent text-sm outline-none w-24" placeholder="Search…" style={{ color: 'var(--text-primary)' }} />
+              <input className="bg-transparent text-sm outline-none w-24" placeholder="Search jobs…" style={{ color: 'var(--text-primary)' }}
+                value={jobSearch} onChange={e => setJobSearch(e.target.value)} />
             </div>
             <button className="relative w-9 h-9 flex items-center justify-center rounded-xl" style={{ color: 'var(--text-secondary)' }}>
               <Bell size={17} />
-              <span className="absolute top-2 right-2 w-1.5 h-1.5 rounded-full" style={{ background: 'var(--accent-1)' }} />
+              {totalApps > 0 && <span className="absolute top-2 right-2 w-1.5 h-1.5 rounded-full" style={{ background: 'var(--accent-1)' }} />}
             </button>
           </div>
         </header>
 
-        {/* Content */}
         <main className="flex-1 overflow-y-auto" style={{ padding: '32px' }}>
 
           {/* ── OVERVIEW ── */}
@@ -220,13 +341,11 @@ export default function DashboardPage() {
                 style={{ background: 'var(--accent-1)', boxShadow: '0 4px 24px rgba(37,99,235,0.25)' }}>
                 <div>
                   <p className="text-blue-200 text-xs font-medium uppercase tracking-[0.08em] mb-2">Welcome back</p>
-                  <h2 className="text-white text-xl font-semibold mb-1.5" style={{ letterSpacing: '-0.01em' }}>
-                    {companyName || userEmail.split('@')[0]}
-                  </h2>
+                  <h2 className="text-white text-xl font-semibold mb-1.5" style={{ letterSpacing: '-0.01em' }}>{companyName}</h2>
                   <p className="text-blue-200 text-sm">
                     {jobs.length === 0
                       ? 'Post your first job listing to start finding candidates.'
-                      : `${activeJobs} active listing${activeJobs !== 1 ? 's' : ''} · ${totalApps} application${totalApps !== 1 ? 's' : ''}`}
+                      : `${activeJobs} active listing${activeJobs !== 1 ? 's' : ''} · ${totalApps} match${totalApps !== 1 ? 'es' : ''}`}
                   </p>
                 </div>
                 <button onClick={() => setView('Post a Job')}
@@ -238,10 +357,10 @@ export default function DashboardPage() {
 
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
                 {[
-                  { label: 'Jobs Posted',      value: jobs.length, icon: <Briefcase size={18} />,  accent: 'var(--accent-1)', soft: 'var(--accent-1-soft)' },
-                  { label: 'Active Listings',  value: activeJobs,  icon: <TrendingUp size={18} />, accent: '#16A34A',         soft: '#F0FDF4' },
-                  { label: 'Applications',     value: totalApps,   icon: <Users size={18} />,      accent: '#7C3AED',         soft: '#F5F3FF' },
-                  { label: 'WhatsApp Matches', value: totalApps,   icon: <Bell size={18} />,       accent: '#D97706',         soft: '#FFFBEB' },
+                  { label: 'Jobs Posted',      value: jobs.length,  icon: <Briefcase size={18} />,  accent: 'var(--accent-1)', soft: 'var(--accent-1-soft)' },
+                  { label: 'Active Listings',  value: activeJobs,   icon: <TrendingUp size={18} />, accent: '#16A34A',         soft: '#F0FDF4' },
+                  { label: 'WhatsApp Matches', value: totalApps,    icon: <Users size={18} />,      accent: '#7C3AED',         soft: '#F5F3FF' },
+                  { label: 'Notifications Sent', value: totalApps,  icon: <Bell size={18} />,       accent: '#D97706',         soft: '#FFFBEB' },
                 ].map((s, i) => (
                   <div key={s.label} className="animate-reveal-up" style={{ ...card, padding: '24px', animationDelay: `${i * 60}ms`, opacity: 0 }}>
                     <div className="flex items-center justify-between mb-4">
@@ -319,7 +438,7 @@ export default function DashboardPage() {
                         </div>
                         <div className="flex-1 min-w-0">
                           <p className="font-medium text-sm truncate" style={{ color: 'var(--text-primary)' }}>{job.title}</p>
-                          <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>{job.company} · {job.location}</p>
+                          <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>{job.location} · {job.applications} match{job.applications !== 1 ? 'es' : ''}</p>
                         </div>
                         <JobStatusBadge status={job.status} />
                       </div>
@@ -335,12 +454,13 @@ export default function DashboardPage() {
             <div className="max-w-2xl">
               <div className="mb-8">
                 <h2 className="font-semibold mb-1" style={{ fontSize: '20px', color: 'var(--text-primary)', letterSpacing: '-0.01em' }}>Post a Job</h2>
-                <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>Fill in the details to create a new listing.</p>
+                <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>Fill in the details. Our AI will automatically match candidates on WhatsApp.</p>
               </div>
               {postSuccess && (
                 <div className="flex items-center gap-3 mb-6 animate-toast"
                   style={{ padding: '14px 16px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: '12px' }}>
-                  <p className="text-sm font-medium" style={{ color: '#15803D' }}>✓ Job posted! Redirecting…</p>
+                  <CheckCircle size={16} style={{ color: '#16A34A' }} />
+                  <p className="text-sm font-medium" style={{ color: '#15803D' }}>Job posted! Matching candidates…</p>
                 </div>
               )}
               <form onSubmit={handlePost} style={{ ...card }}>
@@ -352,13 +472,12 @@ export default function DashboardPage() {
                   <div style={{ gridColumn: '1 / -1' }}>
                     <FormField label="Job Title *" value={form.title} onChange={v => setForm({ ...form, title: v })} placeholder="e.g. Senior Software Engineer" required />
                   </div>
-                  <FormField label="Company Name *" value={form.company} onChange={v => setForm({ ...form, company: v })} placeholder="e.g. ABC Technologies" required />
                   <FormField label="Location *" value={form.location} onChange={v => setForm({ ...form, location: v })} placeholder="e.g. Colombo" required icon={<MapPin size={13} />} />
                   <div>
                     <label className="block text-sm font-medium mb-1.5" style={{ color: 'var(--text-primary)' }}>Job Type *</label>
                     <div className="relative">
                       <Clock size={13} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: 'var(--text-tertiary)' }} />
-                      <select value={form.type} onChange={e => setForm({ ...form, type: e.target.value })} className="w-full text-sm"
+                      <select value={form.job_type} onChange={e => setForm({ ...form, job_type: e.target.value })} className="w-full text-sm"
                         style={{ padding: '11px 16px 11px 36px', background: 'var(--bg-sunken)', border: '1px solid transparent', borderRadius: '10px', color: 'var(--text-primary)', outline: 'none', appearance: 'none' }}>
                         {['Full-time', 'Part-time', 'Contract', 'Remote', 'Internship'].map(t => <option key={t}>{t}</option>)}
                       </select>
@@ -367,7 +486,7 @@ export default function DashboardPage() {
                   <FormField label="Salary Range" value={form.salary} onChange={v => setForm({ ...form, salary: v })} placeholder="e.g. LKR 80,000–120,000" icon={<DollarSign size={13} />} />
                   <FormField label="Deadline" type="date" value={form.deadline} onChange={v => setForm({ ...form, deadline: v })} icon={<Calendar size={13} />} />
                   <div style={{ gridColumn: '1 / -1' }}>
-                    <FormField label="Required Skills" value={form.skills} onChange={v => setForm({ ...form, skills: v })} placeholder="e.g. Python, React, SQL (comma separated)" />
+                    <FormField label="Required Skills (comma separated)" value={form.skills} onChange={v => setForm({ ...form, skills: v })} placeholder="e.g. Python, React, SQL" />
                   </div>
                   <div style={{ gridColumn: '1 / -1' }}>
                     <label className="block text-sm font-medium mb-1.5" style={{ color: 'var(--text-primary)' }}>Job Description *</label>
@@ -399,7 +518,10 @@ export default function DashboardPage() {
               <div className="flex items-center justify-between mb-6">
                 <div>
                   <h2 className="font-semibold mb-0.5" style={{ fontSize: '20px', color: 'var(--text-primary)', letterSpacing: '-0.01em' }}>My Jobs</h2>
-                  <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>{jobs.length} listing{jobs.length !== 1 ? 's' : ''}</p>
+                  <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>
+                    {filteredJobs.length}{jobSearch ? ` of ${jobs.length}` : ''} listing{filteredJobs.length !== 1 ? 's' : ''}
+                    {jobSearch && <button onClick={() => setJobSearch('')} className="ml-2 text-xs" style={{ color: 'var(--accent-1)' }}>Clear</button>}
+                  </p>
                 </div>
                 <button onClick={() => setView('Post a Job')} className="flex items-center gap-2 text-white text-sm font-medium"
                   style={{ padding: '9px 18px', background: 'var(--accent-1)', borderRadius: '10px' }}>
@@ -415,9 +537,13 @@ export default function DashboardPage() {
                   <button onClick={() => setView('Post a Job')} className="text-white text-sm font-medium"
                     style={{ padding: '9px 20px', background: 'var(--accent-1)', borderRadius: '10px' }}>Post a Job</button>
                 </div>
+              ) : filteredJobs.length === 0 ? (
+                <div style={{ ...card, padding: '64px', textAlign: 'center' }}>
+                  <p className="text-sm" style={{ color: 'var(--text-tertiary)' }}>No jobs match your search.</p>
+                </div>
               ) : (
                 <div className="space-y-3">
-                  {jobs.map(job => (
+                  {filteredJobs.map(job => (
                     <div key={job.id} style={{ ...card, padding: '24px' }}>
                       <div className="flex items-start justify-between gap-6">
                         <div className="flex-1 min-w-0">
@@ -425,28 +551,30 @@ export default function DashboardPage() {
                             <h3 className="font-semibold" style={{ color: 'var(--text-primary)', fontSize: '15px' }}>{job.title}</h3>
                             <JobStatusBadge status={job.status} />
                             <span className="text-xs font-medium px-2.5 py-0.5 rounded-md"
-                              style={{ background: 'var(--bg-sunken)', color: 'var(--text-secondary)' }}>{job.type}</span>
+                              style={{ background: 'var(--bg-sunken)', color: 'var(--text-secondary)' }}>{job.job_type}</span>
                           </div>
                           <p className="text-sm flex items-center gap-1.5 mb-3" style={{ color: 'var(--text-secondary)' }}>
-                            <MapPin size={12} />{job.company} · {job.location}
+                            <MapPin size={12} />{job.company_name} · {job.location}
                           </p>
-                          {job.skills && (
+                          {job.skills && job.skills.length > 0 && (
                             <div className="flex flex-wrap gap-1.5 mb-3">
-                              {job.skills.split(',').map(s => (
+                              {job.skills.map(s => (
                                 <span key={s} className="text-xs font-medium px-2.5 py-0.5 rounded-md"
-                                  style={{ background: 'var(--bg-sunken)', color: 'var(--text-secondary)' }}>{s.trim()}</span>
+                                  style={{ background: 'var(--bg-sunken)', color: 'var(--text-secondary)' }}>{s}</span>
                               ))}
                             </div>
                           )}
                           <div className="flex flex-wrap gap-4 text-xs" style={{ color: 'var(--text-tertiary)' }}>
-                            <span className="flex items-center gap-1"><Calendar size={11} />{new Date(job.postedAt).toLocaleDateString()}</span>
+                            <span className="flex items-center gap-1"><Calendar size={11} />{new Date(job.posted_at).toLocaleDateString()}</span>
                             {job.deadline && <span className="flex items-center gap-1"><Clock size={11} />Deadline: {new Date(job.deadline).toLocaleDateString()}</span>}
                             {job.salary && <span className="flex items-center gap-1"><DollarSign size={11} />{job.salary}</span>}
                           </div>
                         </div>
-                        <div className="text-center shrink-0 rounded-2xl px-6 py-4" style={{ background: 'var(--bg-sunken)' }}>
+                        <div className="text-center shrink-0 rounded-2xl px-6 py-4 cursor-pointer"
+                          style={{ background: 'var(--bg-sunken)' }}
+                          onClick={() => { setView('Applicants'); loadCandidates(job.id); }}>
                           <p className="font-bold" style={{ fontSize: '28px', color: 'var(--text-primary)', letterSpacing: '-0.02em' }}>{job.applications}</p>
-                          <p className="text-xs font-medium mt-0.5" style={{ color: 'var(--text-secondary)' }}>Applicants</p>
+                          <p className="text-xs font-medium mt-0.5" style={{ color: 'var(--accent-1)' }}>View Matches</p>
                         </div>
                       </div>
                       {job.description && (
@@ -471,28 +599,110 @@ export default function DashboardPage() {
 
           {/* ── APPLICANTS ── */}
           {view === 'Applicants' && (
-            <div className="max-w-2xl">
-              <div className="mb-8">
-                <h2 className="font-semibold mb-1" style={{ fontSize: '20px', color: 'var(--text-primary)', letterSpacing: '-0.01em' }}>Applicants</h2>
-                <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>Candidates matched to your listings via AI.</p>
+            <div className="max-w-[1280px]">
+              <div className="mb-6">
+                <h2 className="font-semibold mb-1" style={{ fontSize: '20px', color: 'var(--text-primary)', letterSpacing: '-0.01em' }}>Matched Candidates</h2>
+                <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>AI-matched job seekers notified via WhatsApp</p>
               </div>
-              <div style={{ ...card, padding: '64px', textAlign: 'center' }}>
-                <div className="w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-5"
-                  style={{ background: 'var(--accent-1-soft)' }}>
-                  <Users size={24} style={{ color: 'var(--accent-1)' }} />
+
+              {/* Job selector */}
+              {jobs.length > 0 && (
+                <div className="mb-6" style={{ ...card, padding: '20px 24px' }}>
+                  <label className="block text-xs font-medium mb-2" style={{ color: 'var(--text-secondary)' }}>Select a job to view its matches</label>
+                  <select
+                    value={selectedJobId}
+                    onChange={e => loadCandidates(e.target.value)}
+                    className="w-full text-sm"
+                    style={{ padding: '10px 14px', background: 'var(--bg-sunken)', border: '1px solid transparent', borderRadius: '10px', color: 'var(--text-primary)', outline: 'none' }}>
+                    <option value="">— Choose a job —</option>
+                    {jobs.map(j => (
+                      <option key={j.id} value={j.id}>{j.title} ({j.applications} match{j.applications !== 1 ? 'es' : ''})</option>
+                    ))}
+                  </select>
                 </div>
-                <p className="font-semibold mb-2" style={{ color: 'var(--text-primary)', fontSize: '16px' }}>Coming in Phase 2</p>
-                <p className="text-sm max-w-xs mx-auto" style={{ color: 'var(--text-secondary)', lineHeight: '1.6' }}>
-                  WhatsApp-matched candidates will appear here with full profiles, skill scores, and CV details.
-                </p>
-                <div className="grid grid-cols-3 gap-3 mt-8">
-                  {['Profile View', 'Skills Match', 'WhatsApp Contact'].map(f => (
-                    <div key={f} className="rounded-xl p-4" style={{ background: 'var(--bg-sunken)' }}>
-                      <p className="text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>{f}</p>
+              )}
+
+              {candidatesLoading && (
+                <div className="text-center py-12" style={{ color: 'var(--text-tertiary)', fontSize: '14px' }}>
+                  Loading candidates…
+                </div>
+              )}
+
+              {!candidatesLoading && selectedJobId && candidates.length === 0 && (
+                <div style={{ ...card, padding: '64px', textAlign: 'center' }}>
+                  <div className="w-12 h-12 rounded-2xl flex items-center justify-center mx-auto mb-4" style={{ background: 'var(--bg-sunken)' }}>
+                    <Users size={20} style={{ color: 'var(--text-tertiary)' }} />
+                  </div>
+                  <p className="font-medium mb-1" style={{ color: 'var(--text-primary)' }}>No matches yet</p>
+                  <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>Candidates are matched when the job is posted. Try updating the skills or description.</p>
+                </div>
+              )}
+
+              {!candidatesLoading && !selectedJobId && jobs.length === 0 && (
+                <div style={{ ...card, padding: '64px', textAlign: 'center' }}>
+                  <div className="w-12 h-12 rounded-2xl flex items-center justify-center mx-auto mb-4" style={{ background: 'var(--accent-1-soft)' }}>
+                    <Users size={24} style={{ color: 'var(--accent-1)' }} />
+                  </div>
+                  <p className="font-semibold mb-2" style={{ color: 'var(--text-primary)', fontSize: '16px' }}>No jobs posted yet</p>
+                  <p className="text-sm max-w-xs mx-auto" style={{ color: 'var(--text-secondary)', lineHeight: '1.6' }}>
+                    Post a job to see AI-matched candidates with their profiles and CV details.
+                  </p>
+                </div>
+              )}
+
+              {!candidatesLoading && candidates.length > 0 && (
+                <div className="space-y-3">
+                  {candidates.map(c => (
+                    <div key={c.phone} style={{ ...card, padding: '24px 28px' }}>
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2.5 mb-1">
+                            <div className="w-8 h-8 rounded-full flex items-center justify-center shrink-0"
+                              style={{ background: 'var(--accent-1-soft)' }}>
+                              <span className="text-xs font-semibold" style={{ color: 'var(--accent-1)' }}>
+                                {(c.name || c.phone)[0]?.toUpperCase()}
+                              </span>
+                            </div>
+                            <div>
+                              <p className="font-medium text-sm" style={{ color: 'var(--text-primary)' }}>{c.name || c.phone}</p>
+                              {c.name && <p className="text-xs" style={{ color: 'var(--text-tertiary)' }}>{c.phone}</p>}
+                            </div>
+                          </div>
+                          <p className="text-xs mt-2 mb-3" style={{ color: 'var(--text-secondary)' }}>
+                            {[c.experience_level, c.location].filter(Boolean).join(' · ')}
+                          </p>
+                          {c.skills && c.skills.length > 0 && (
+                            <div className="flex flex-wrap gap-1.5">
+                              {c.skills.map(s => (
+                                <span key={s} className="text-xs font-medium px-2.5 py-0.5 rounded-md"
+                                  style={{ background: 'var(--bg-sunken)', color: 'var(--text-secondary)' }}>{s}</span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className="text-xs font-medium px-2.5 py-1 rounded-lg"
+                            style={{ background: '#F0FDF4', color: '#15803D' }}>Matched</span>
+                          {c.cv_s3_key && (
+                            <button
+                              onClick={async () => {
+                                const res = await fetch(`${FILE_URL}/cv/${c.phone}/latest/download`);
+                                if (res.ok) {
+                                  const data = await res.json();
+                                  window.open(data.download_url, '_blank');
+                                }
+                              }}
+                              className="flex items-center gap-1 text-xs font-medium"
+                              style={{ padding: '6px 10px', background: 'var(--bg-sunken)', borderRadius: '8px', color: 'var(--text-secondary)' }}>
+                              <Download size={12} />CV
+                            </button>
+                          )}
+                        </div>
+                      </div>
                     </div>
                   ))}
                 </div>
-              </div>
+              )}
             </div>
           )}
 
