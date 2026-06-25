@@ -97,6 +97,46 @@ def health_check():
     return {"status": "ok", "service": "matching-service"}
 
 
+# ── Job embedding (enables reverse matching) ──────────────────────────────────
+# NOTE: static routes /embed/cv and /embed/job must be registered BEFORE the
+# parameterised /embed/{phone} route, otherwise FastAPI matches them as phone="cv"
+# or phone="job" and returns 422.
+
+@app.post("/embed/cv")
+def embed_candidate_cv(request: CVEmbedRequest, phone: str):
+    """Legacy endpoint — prefer POST /embed/{phone}."""
+    try:
+        vectors = embed_cv(
+            phone=phone,
+            skills=request.skills,
+            experience=request.experience,
+            full_text=request.full_text,
+        )
+        index.upsert(vectors=vectors)
+        return {"status": "success", "phone": phone, "vectors_stored": len(vectors)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/embed/job")
+def embed_job_endpoint(request: JobEmbedRequest):
+    """
+    Store a job vector in Pinecone.
+    Called by Company Service when a job is posted.
+    Enables reverse candidate-to-job matching for new CV uploads.
+    """
+    try:
+        embed_job_to_pinecone(
+            job_id=request.job_id,
+            title=request.title,
+            skills=request.skills,
+            description=request.description,
+        )
+        return {"status": "success", "job_id": request.job_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ── Candidate embedding ───────────────────────────────────────────────────────
 
 @app.post("/embed/{phone}")
@@ -120,43 +160,6 @@ def embed_by_phone(phone: str, request: CVEmbedByPhoneRequest):
         )
         index.upsert(vectors=vectors)
         return {"status": "success", "phone": phone, "vectors_stored": len(vectors)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/embed/cv")
-def embed_candidate_cv(request: CVEmbedRequest, phone: str):
-    """Legacy endpoint — prefer POST /embed/{phone}."""
-    try:
-        vectors = embed_cv(
-            phone=phone,
-            skills=request.skills,
-            experience=request.experience,
-            full_text=request.full_text,
-        )
-        index.upsert(vectors=vectors)
-        return {"status": "success", "phone": phone, "vectors_stored": len(vectors)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ── Job embedding (enables reverse matching) ──────────────────────────────────
-
-@app.post("/embed/job")
-def embed_job_endpoint(request: JobEmbedRequest):
-    """
-    Store a job vector in Pinecone.
-    Called by Company Service when a job is posted.
-    Enables reverse candidate-to-job matching for new CV uploads.
-    """
-    try:
-        embed_job_to_pinecone(
-            job_id=request.job_id,
-            title=request.title,
-            skills=request.skills,
-            description=request.description,
-        )
-        return {"status": "success", "job_id": request.job_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

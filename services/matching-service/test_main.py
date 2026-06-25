@@ -16,7 +16,10 @@ def mock_pinecone_index():
     mock_idx.upsert.return_value = None
     mock_idx.query.return_value = MagicMock(matches=[])
     mock_idx.describe_index_stats.return_value = {"dimension": 384, "total_vector_count": 0}
-    with patch("embedder.index", mock_idx), patch("main.index", mock_idx):
+    # patch all three references: embedder.index, main.index, matcher.index
+    with patch("embedder.index", mock_idx), \
+         patch("main.index", mock_idx), \
+         patch("matcher.index", mock_idx):
         yield mock_idx
 
 
@@ -24,8 +27,11 @@ def mock_pinecone_index():
 def mock_sentence_model():
     """Return a deterministic 384-dim vector without loading the real model."""
     fake_vector = [0.1] * 384
+    mock_result = MagicMock()
+    mock_result.tolist.return_value = fake_vector
     with patch("embedder.model") as mock_model:
-        mock_model.encode.return_value = fake_vector
+        # encode() returns an object with .tolist() — matches SentenceTransformer behaviour
+        mock_model.encode.return_value = mock_result
         yield mock_model
 
 
