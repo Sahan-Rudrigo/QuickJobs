@@ -15,8 +15,12 @@ from unittest.mock import patch, AsyncMock, MagicMock, call
 # ── Helpers ───────────────────────────────────────────────────────────
 
 def run(coro):
-    """Run an async coroutine in a sync test."""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    """Run an async coroutine in a sync test (compatible with Python 3.10+)."""
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 def make_mocks(step="IDLE", data=None):
@@ -136,15 +140,25 @@ def test_cancel_delete_idle_when_no_data():
 # ── Onboarding flow ───────────────────────────────────────────────────
 
 def test_idle_hello_triggers_welcome():
-    for greeting in ("hi", "hello", "register", "start"):
+    # "start" is a global override (→ ACTIVE), not an onboarding trigger
+    for greeting in ("hi", "hello", "register"):
         set_calls, send_calls = drive("94771234567", greeting, step="IDLE")
         assert any("AWAITING_NAME" in str(c) for c in set_calls), f"Failed for: {greeting}"
         assert len(send_calls) == 1
 
 
+def test_idle_start_goes_to_active_not_onboarding():
+    """START is a global override — must go to ACTIVE, not start onboarding."""
+    set_calls, send_calls = drive("94771234567", "start", step="IDLE")
+    assert any("ACTIVE" in str(c) for c in set_calls)
+    assert not any("AWAITING_NAME" in str(c) for c in set_calls)
+
+
 def test_idle_unknown_no_response():
-    set_calls, send_calls = drive("94771234567", "what is this", step="IDLE")
-    assert len(send_calls) == 0
+    # "what is this" contains "hi" as a substring in "this" — must NOT trigger
+    for msg in ("what is this", "history", "this is me", "not registered"):
+        set_calls, send_calls = drive("94771234567", msg, step="IDLE")
+        assert len(send_calls) == 0, f"Falsely triggered for: {msg}"
 
 
 def test_awaiting_name_stores_name():

@@ -111,7 +111,8 @@ async def handle_message(phone: str, text: str):
     # ── Onboarding flow ──────────────────────────────────────────
 
     if step == "IDLE":
-        if any(kw in text.lower() for kw in ("hi", "hello", "register", "start")):
+        words = set(text.lower().split())
+        if words & {"hi", "hello", "register"}:
             set_state(phone, "AWAITING_NAME", data)
             await send_text(phone, templates.WELCOME)
 
