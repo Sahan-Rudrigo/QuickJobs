@@ -11,12 +11,13 @@ class CompanyCreate(BaseModel):
 
 
 class CompanyResponse(BaseModel):
-    id:            str
-    name:          str
-    email:         str
-    industry:      Optional[str]
-    status:        str
-    registered_at: datetime
+    id:              str
+    name:            str
+    email:           str
+    industry:        Optional[str]
+    status:          str
+    registered_at:   datetime
+    cognito_user_id: Optional[str] = None
 
     class Config:
         from_attributes = True
