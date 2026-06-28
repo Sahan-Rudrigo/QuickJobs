@@ -6,3 +6,4 @@ __pycache__
 generate_report.py
 QuickJobs_Progress_Report.html
 QuickJobs_Progress_Report.pdf
+AWS_DEPLOYMENT.md
