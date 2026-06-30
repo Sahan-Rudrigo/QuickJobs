@@ -62,6 +62,7 @@ export default function DashboardPage() {
   const [form, setForm]                 = useState(emptyForm);
   const [posting, setPosting]           = useState(false);
   const [postSuccess, setPostSuccess]   = useState(false);
+  const [postError, setPostError]       = useState('');
   const [initLoading, setInitLoading]   = useState(true);
   const [jobsLoading, setJobsLoading]   = useState(false);
 
@@ -137,9 +138,17 @@ export default function DashboardPage() {
   }
 
   const handlePost = async (e: React.FormEvent) => {
-    if (!company) return;
     e.preventDefault();
+    if (!company) {
+      setPostError('Company profile not loaded. Please refresh the page.');
+      return;
+    }
+    if (company.status !== 'APPROVED') {
+      setPostError('Your account is pending admin approval. You can post jobs once approved.');
+      return;
+    }
     setPosting(true);
+    setPostError('');
     try {
       const res = await fetch(`${COMPANY_URL}/companies/${company.id}/jobs`, {
         method: 'POST',
@@ -160,7 +169,12 @@ export default function DashboardPage() {
         setForm(emptyForm);
         setPostSuccess(true);
         setTimeout(() => { setPostSuccess(false); setView('My Jobs'); }, 1500);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        setPostError(err.detail || `Failed to post job (${res.status}). Please try again.`);
       }
+    } catch {
+      setPostError('Could not reach the server. Check that the company service is running.');
     } finally {
       setPosting(false);
     }
@@ -498,6 +512,13 @@ export default function DashboardPage() {
                   style={{ padding: '14px 16px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: '12px' }}>
                   <CheckCircle size={16} style={{ color: '#16A34A' }} />
                   <p className="text-sm font-medium" style={{ color: '#15803D' }}>Job posted! Matching candidates…</p>
+                </div>
+              )}
+              {postError && (
+                <div className="flex items-center gap-3 mb-6"
+                  style={{ padding: '14px 16px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: '12px' }}>
+                  <AlertCircle size={16} style={{ color: '#DC2626' }} />
+                  <p className="text-sm font-medium" style={{ color: '#B91C1C' }}>{postError}</p>
                 </div>
               )}
               <form onSubmit={handlePost} style={{ ...card }}>
