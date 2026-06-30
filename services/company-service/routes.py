@@ -103,6 +103,11 @@ def create_or_get_company(payload: CompanyCreate, db: Session = Depends(get_db))
 
     by_email = db.query(Company).filter(Company.email == payload.email).first()
     if by_email:
+        # Backfill cognito_user_id if it was missing so future by-user lookups work
+        if not by_email.cognito_user_id and payload.cognito_user_id:
+            by_email.cognito_user_id = payload.cognito_user_id
+            db.commit()
+            db.refresh(by_email)
         return by_email
 
     company = Company(

@@ -99,7 +99,8 @@ export default function DashboardPage() {
       try {
         const attrs = await fetchUserAttributes();
         const sub         = session.tokens?.accessToken?.payload['sub'] as string || u.username;
-        const companyName = attrs.name || u.username.split('@')[0];
+        const email       = attrs.email || u.username;
+        const companyName = attrs.name || email.split('@')[0];
 
         let co: Company | null = null;
         const byUser = await fetch(`${COMPANY_URL}/companies/by-user/${sub}`);
@@ -109,7 +110,7 @@ export default function DashboardPage() {
           const created = await fetch(`${COMPANY_URL}/companies`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: companyName, email: u.username, cognito_user_id: sub }),
+            body: JSON.stringify({ name: companyName, email: email, cognito_user_id: sub }),
           });
           if (created.ok) co = await created.json();
         }
