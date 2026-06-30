@@ -42,8 +42,11 @@ def create_user(user: UserCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(new_user)
 
-    # Cache opt_in status in Redis
-    set_opt_in_status(new_user.phone, new_user.opt_in_status)
+    # Cache opt_in status in Redis — non-critical, don't fail if Redis is down
+    try:
+        set_opt_in_status(new_user.phone, new_user.opt_in_status)
+    except Exception as e:
+        print(f"[WARN] Redis unavailable, opt-in not cached for {new_user.phone}: {e}")
 
     return new_user
 
