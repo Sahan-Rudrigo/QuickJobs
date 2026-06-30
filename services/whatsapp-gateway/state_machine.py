@@ -17,7 +17,12 @@ UPDATE_FIELD_MAP = {
 USER_SERVICE_URL = os.getenv("USER_SERVICE_URL", "http://localhost:8001")
 FILE_SERVICE_URL = os.getenv("FILE_SERVICE_URL", "http://localhost:8002")
 
-_DELETE_KEYWORDS = {"DELETE MY DATA", "DELETE DATA", "ERASE MY DATA", "ERASE DATA"}
+_DELETE_KEYWORDS   = {"DELETE MY DATA", "DELETE DATA", "ERASE MY DATA", "ERASE DATA"}
+_ONBOARDING_STEPS  = {
+    "IDLE", "AWAITING_NAME", "AWAITING_SKILLS", "AWAITING_EXPERIENCE",
+    "AWAITING_LOCATION", "AWAITING_SALARY", "AWAITING_CV",
+}
+_RESTART_TRIGGERS  = {"hi", "hello", "register", "restart"}
 
 
 def _parse_salary(text: str):
@@ -48,9 +53,16 @@ async def _create_user_profile(phone: str, data: dict) -> None:
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(f"{USER_SERVICE_URL}/users", json=payload)
-            if resp.status_code == 400:
-                await client.patch(f"{USER_SERVICE_URL}/users/{phone}", json=payload)
-        print(f"[INFO] User profile created/updated for {phone}")
+            if resp.status_code == 201:
+                print(f"[INFO] User profile created for {phone}")
+            elif resp.status_code == 400:
+                patch = await client.patch(f"{USER_SERVICE_URL}/users/{phone}", json=payload)
+                if patch.status_code == 200:
+                    print(f"[INFO] User profile updated for {phone}")
+                else:
+                    print(f"[ERROR] PATCH /users/{phone} returned {patch.status_code}: {patch.text}")
+            else:
+                print(f"[ERROR] POST /users returned {resp.status_code}: {resp.text}")
     except Exception as e:
         print(f"[ERROR] Failed to create user profile for {phone}: {e}")
 
@@ -97,6 +109,13 @@ async def handle_message(phone: str, text: str):
         await send_text(phone, templates.ASK_DELETE_CONFIRM)
         return
 
+    # ── Global restart ────────────────────────────────────────────
+    # "hi / hello / register / restart" restarts onboarding from any stuck state
+    if step in _ONBOARDING_STEPS and set(text.lower().split()) & _RESTART_TRIGGERS:
+        set_state(phone, "AWAITING_NAME", {})
+        await send_text(phone, templates.WELCOME)
+        return
+
     # ── Deletion confirmation state ───────────────────────────────
     if step == "CONFIRMING_DELETE":
         if text.upper() == "CONFIRM DELETE":
@@ -111,10 +130,8 @@ async def handle_message(phone: str, text: str):
     # ── Onboarding flow ──────────────────────────────────────────
 
     if step == "IDLE":
-        words = set(text.lower().split())
-        if words & {"hi", "hello", "register"}:
-            set_state(phone, "AWAITING_NAME", data)
-            await send_text(phone, templates.WELCOME)
+        # restart triggers already handled above — any other message gets a guide
+        await send_text(phone, templates.IDLE_PROMPT)
 
     elif step == "AWAITING_NAME":
         data["name"] = text

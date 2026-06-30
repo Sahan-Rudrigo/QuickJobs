@@ -1,10 +1,11 @@
 from fastapi import FastAPI, Request, Query
 from dotenv import load_dotenv
 from state_machine import handle_message
-from whatsapp_api import download_media, forward_cv_to_file_service
+from whatsapp_api import download_media, forward_cv_to_file_service, send_text
 from redis_client import get_state
 import os
 import traceback
+import templates
 
 load_dotenv()
 
@@ -51,7 +52,7 @@ async def receive_message(request: Request):
             media_id   = media_data.get("id")
 
             if not media_id:
-                await handle_message(phone, "__CV_UPLOADED__")
+                await send_text(phone, "❌ We couldn't receive your file. Please try sending it again.")
                 return {"status": "ok"}
 
             # Download file from Meta
@@ -63,8 +64,8 @@ async def receive_message(request: Request):
             skills     = user_data.get("skills", [])
             experience = user_data.get("experience_level", "")
 
-            # Forward to File Service
-            await forward_cv_to_file_service(
+            # Forward to File Service — only advance state machine on success
+            result = await forward_cv_to_file_service(
                 phone=phone,
                 file_bytes=file_bytes,
                 filename=filename,
@@ -73,7 +74,10 @@ async def receive_message(request: Request):
                 experience=experience,
             )
 
-            # Advance the state machine
+            if not result:
+                await send_text(phone, templates.CV_UPLOAD_FAILED)
+                return {"status": "ok"}
+
             await handle_message(phone, "__CV_UPLOADED__")
 
     except Exception:
