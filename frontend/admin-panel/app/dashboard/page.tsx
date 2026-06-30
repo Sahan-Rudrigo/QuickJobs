@@ -352,7 +352,7 @@ export default function AdminDashboard() {
                   </div>
                   <div className="space-y-0" style={{ borderTop: '1px solid var(--border-subtle)' }}>
                     {pending.slice(0, 3).map(c => (
-                      <PendingRow key={c.id} company={c} onApprove={approve} onReject={reject} />
+                      <PendingRow key={c.id} company={c} onApprove={activate} onReject={reject} />
                     ))}
                   </div>
                 </div>
@@ -423,11 +423,6 @@ export default function AdminDashboard() {
                           <button onClick={() => activate(c.id)} className="flex items-center gap-1.5 text-xs font-medium transition-all"
                             style={{ padding: '7px 14px', background: '#EFF6FF', borderRadius: '8px', color: '#1D4ED8' }}
                             title="Approve and grant login access via Cognito group">
-                            <CheckCircle size={13} />Activate &amp; Approve
-                          </button>
-                          <button onClick={() => approve(c.id)} className="flex items-center gap-1.5 text-xs font-medium transition-all"
-                            style={{ padding: '7px 14px', background: '#F0FDF4', borderRadius: '8px', color: '#15803D' }}
-                            title="Approve without Cognito group (for admin-created accounts)">
                             <CheckCircle size={13} />Approve
                           </button>
                           <button onClick={() => reject(c.id)} className="flex items-center gap-1.5 text-xs font-medium transition-all"
