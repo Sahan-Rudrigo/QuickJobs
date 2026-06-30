@@ -138,6 +138,15 @@ export default function DashboardPage() {
     }
   }
 
+  async function getAuthHeaders(): Promise<HeadersInit> {
+    try {
+      const session = await fetchAuthSession();
+      const token = session.tokens?.accessToken?.toString();
+      if (token) return { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
+    } catch {}
+    return { 'Content-Type': 'application/json' };
+  }
+
   const handlePost = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!company) {
@@ -153,7 +162,7 @@ export default function DashboardPage() {
     try {
       const res = await fetch(`${COMPANY_URL}/companies/${company.id}/jobs`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: await getAuthHeaders(),
         body: JSON.stringify({
           title:       form.title,
           location:    form.location,
@@ -182,7 +191,8 @@ export default function DashboardPage() {
   };
 
   const toggleStatus = async (jobId: string) => {
-    const res = await fetch(`${COMPANY_URL}/jobs/${jobId}/status`, { method: 'PATCH' });
+    const headers = await getAuthHeaders();
+    const res = await fetch(`${COMPANY_URL}/jobs/${jobId}/status`, { method: 'PATCH', headers });
     if (res.ok) {
       const updated: Job = await res.json();
       setJobs(prev => prev.map(j => j.id === jobId ? updated : j));
@@ -190,7 +200,8 @@ export default function DashboardPage() {
   };
 
   const deleteJob = async (jobId: string) => {
-    const res = await fetch(`${COMPANY_URL}/jobs/${jobId}`, { method: 'DELETE' });
+    const headers = await getAuthHeaders();
+    const res = await fetch(`${COMPANY_URL}/jobs/${jobId}`, { method: 'DELETE', headers });
     if (res.ok) setJobs(prev => prev.filter(j => j.id !== jobId));
   };
 
