@@ -70,17 +70,28 @@ export default function AdminDashboard() {
     init();
   }, [router]);
 
+  async function getAuthHeaders(): Promise<HeadersInit> {
+    try {
+      const session = await fetchAuthSession();
+      const token = session.tokens?.accessToken?.toString();
+      if (token) return { Authorization: `Bearer ${token}` };
+    } catch {}
+    return {};
+  }
+
   async function loadAll() {
     setLoading(true);
     setError('');
     try {
+      const headers = await getAuthHeaders();
       const [cRes, jRes, uRes, sRes] = await Promise.all([
-        fetch(`${COMPANY_URL}/admin/companies`),
-        fetch(`${COMPANY_URL}/admin/jobs`),
+        fetch(`${COMPANY_URL}/admin/companies`, { headers }),
+        fetch(`${COMPANY_URL}/admin/jobs`,      { headers }),
         fetch(`${USER_URL}/users?limit=100`),
-        fetch(`${COMPANY_URL}/admin/stats`),
+        fetch(`${COMPANY_URL}/admin/stats`,     { headers }),
       ]);
       if (cRes.ok) setCompanies(await cRes.json());
+      else setError(`Failed to load companies (${cRes.status}). Check that the company service is running.`);
       if (jRes.ok) setJobs(await jRes.json());
       if (uRes.ok) setUsers(await uRes.json());
       if (sRes.ok) setStats(await sRes.json());
@@ -92,7 +103,8 @@ export default function AdminDashboard() {
   }
 
   async function activate(id: string) {
-    const res = await fetch(`${COMPANY_URL}/admin/companies/${id}/activate`, { method: 'PATCH' });
+    const headers = await getAuthHeaders();
+    const res = await fetch(`${COMPANY_URL}/admin/companies/${id}/activate`, { method: 'PATCH', headers });
     if (res.ok) {
       const updated: Company = await res.json();
       setCompanies(prev => prev.map(c => c.id === id ? updated : c));
@@ -101,7 +113,8 @@ export default function AdminDashboard() {
   }
 
   async function approve(id: string) {
-    const res = await fetch(`${COMPANY_URL}/admin/companies/${id}/approve`, { method: 'PATCH' });
+    const headers = await getAuthHeaders();
+    const res = await fetch(`${COMPANY_URL}/admin/companies/${id}/approve`, { method: 'PATCH', headers });
     if (res.ok) {
       const updated: Company = await res.json();
       setCompanies(prev => prev.map(c => c.id === id ? updated : c));
@@ -110,7 +123,8 @@ export default function AdminDashboard() {
   }
 
   async function reject(id: string) {
-    const res = await fetch(`${COMPANY_URL}/admin/companies/${id}/reject`, { method: 'PATCH' });
+    const headers = await getAuthHeaders();
+    const res = await fetch(`${COMPANY_URL}/admin/companies/${id}/reject`, { method: 'PATCH', headers });
     if (res.ok) {
       const updated: Company = await res.json();
       setCompanies(prev => prev.map(c => c.id === id ? updated : c));
@@ -119,7 +133,8 @@ export default function AdminDashboard() {
   }
 
   async function suspend(id: string) {
-    const res = await fetch(`${COMPANY_URL}/admin/companies/${id}/suspend`, { method: 'PATCH' });
+    const headers = await getAuthHeaders();
+    const res = await fetch(`${COMPANY_URL}/admin/companies/${id}/suspend`, { method: 'PATCH', headers });
     if (res.ok) {
       const updated: Company = await res.json();
       setCompanies(prev => prev.map(c => c.id === id ? updated : c));
