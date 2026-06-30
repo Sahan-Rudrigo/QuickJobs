@@ -134,6 +134,102 @@ ngrok http 8000
 
 ---
 
+## Setup & Running
+
+### Prerequisites
+
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/)
+- [ngrok](https://ngrok.com/download) (for exposing the local gateway to Meta)
+- Meta Developer account with a WhatsApp Business App
+
+### Step 1 — Configure environment variables
+
+Create a `.env` file in each service directory. Use the values below as a guide:
+
+**`services/whatsapp-gateway/.env`**
+```env
+WHATSAPP_TOKEN=<your_meta_access_token>
+WHATSAPP_PHONE_ID=<your_phone_number_id>
+WHATSAPP_VERIFY_TOKEN=quickjobs_verify_123
+REDIS_URL=redis://redis:6379
+USER_SERVICE_URL=http://user-service:8001
+FILE_SERVICE_URL=http://file-service:8002
+```
+
+**`services/user-service/.env`**
+```env
+DATABASE_URL=postgresql://admin:password123@postgres:5432/quickjobs
+REDIS_URL=redis://redis:6379
+PORT=8001
+```
+
+**`services/file-service/.env`**
+```env
+DATABASE_URL=postgresql://admin:password123@postgres:5432/quickjobs
+AWS_REGION=ap-south-1
+AWS_ACCESS_KEY_ID=<your_aws_access_key>
+AWS_SECRET_ACCESS_KEY=<your_aws_secret_key>
+S3_BUCKET_NAME=quickjobs-cvs
+SQS_CV_UPLOADED_URL=<your_sqs_queue_url>
+PORT=8002
+```
+
+> **Note:** `WHATSAPP_PHONE_ID` is the **Phone Number ID** found in Meta Developer Console → WhatsApp → API Setup. This is different from the WhatsApp Business Account ID.
+
+### Step 2 — Start services for WhatsApp testing
+
+To test the WhatsApp send/receive flow, start these 5 services:
+
+```bash
+docker compose -f infra/docker-compose.yml up postgres redis user-service file-service whatsapp-gateway -d
+```
+
+Verify all containers are running:
+```bash
+docker compose -f infra/docker-compose.yml ps
+```
+
+Check the gateway health:
+```bash
+curl http://localhost:8000/health
+# Expected: {"status":"ok","service":"whatsapp-gateway","port":8000}
+```
+
+### Step 3 — Expose the gateway with ngrok
+
+```bash
+ngrok http 8000
+```
+
+ngrok will give you a public URL like `https://xxxx.ngrok-free.app`.
+
+### Step 4 — Configure webhook in Meta Developer Console
+
+1. Go to **Meta Developer Console → your App → WhatsApp → Configuration**
+2. Set **Webhook URL** to: `https://<your-ngrok-url>/webhook`
+3. Set **Verify Token** to: `quickjobs_verify_123`
+4. Click **Verify and Save**
+5. Under **Webhook Fields**, subscribe to **messages**
+
+### Step 5 — Test the bot
+
+Send **"hi"** from a whitelisted test number to your WhatsApp Business number. The bot will guide you through the full registration flow.
+
+Watch live logs:
+```bash
+docker logs quickjobs-whatsapp-gateway -f
+```
+
+### Starting all services
+
+To run the complete platform including employer dashboard and notification service:
+
+```bash
+docker compose -f infra/docker-compose.yml up -d
+```
+
+---
+
 ## Environment Variables
 
 Each service has a `.env.example` file listing required variables. The key ones:
