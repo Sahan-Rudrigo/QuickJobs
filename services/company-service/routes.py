@@ -357,7 +357,7 @@ def activate_company(
     """
     Approve a self-registered company AND add the employer to the
     quickjobs-employers Cognito group so they can log in immediately.
-    Falls back to status-only approval if Cognito assignment fails.
+    Returns 503 if the Cognito group assignment fails so the admin is informed.
     """
     company = db.query(Company).filter(Company.id == company_id).first()
     if not company:
@@ -365,6 +365,18 @@ def activate_company(
 
     try:
         cognito = boto3.client("cognito-idp", region_name=COGNITO_REGION)
+
+        # Ensure the group exists — create it if missing
+        try:
+            cognito.create_group(
+                UserPoolId=COGNITO_POOL_ID,
+                GroupName="quickjobs-employers",
+                Description="Approved employers who can post jobs",
+            )
+            print("[INFO] Created Cognito group quickjobs-employers")
+        except cognito.exceptions.GroupExistsException:
+            pass  # group already exists, that's fine
+
         cognito.admin_add_user_to_group(
             UserPoolId=COGNITO_POOL_ID,
             Username=company.email,
@@ -372,7 +384,11 @@ def activate_company(
         )
         print(f"[INFO] Added {company.email} to quickjobs-employers Cognito group")
     except Exception as e:
-        print(f"[WARN] Cognito group assignment failed (activate manually if needed): {e}")
+        print(f"[ERROR] Cognito group assignment failed for {company.email}: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Cognito error: {str(e)}. Check AWS IAM permissions (cognito-idp:CreateGroup, cognito-idp:AdminAddUserToGroup) and that the user pool ID is correct.",
+        )
 
     company.status = "APPROVED"
     db.commit()
