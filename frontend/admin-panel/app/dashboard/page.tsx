@@ -38,6 +38,8 @@ export default function AdminDashboard() {
   const [stats, setStats]         = useState<Stats | null>(null);
   const [loading, setLoading]     = useState(true);
   const [error, setError]         = useState('');
+  const [actionError, setActionError] = useState('');
+  const [actionSuccess, setActionSuccess] = useState('');
 
   const [companySearch, setCompanySearch] = useState('');
   const [jobSearch, setJobSearch]         = useState('');
@@ -103,41 +105,59 @@ export default function AdminDashboard() {
   }
 
   async function activate(id: string) {
+    setActionError(''); setActionSuccess('');
     const headers = await getAuthHeaders();
     const res = await fetch(`${COMPANY_URL}/admin/companies/${id}/activate`, { method: 'PATCH', headers });
     if (res.ok) {
       const updated: Company = await res.json();
       setCompanies(prev => prev.map(c => c.id === id ? updated : c));
       setStats(s => s ? { ...s, pending_approvals: Math.max(0, s.pending_approvals - 1), approved_companies: s.approved_companies + 1 } : s);
+      setActionSuccess('Company activated — employer can now log in.');
+    } else {
+      const body = await res.json().catch(() => ({}));
+      setActionError(body.detail || `Activate failed (${res.status}). Check company service logs.`);
     }
   }
 
   async function approve(id: string) {
+    setActionError(''); setActionSuccess('');
     const headers = await getAuthHeaders();
     const res = await fetch(`${COMPANY_URL}/admin/companies/${id}/approve`, { method: 'PATCH', headers });
     if (res.ok) {
       const updated: Company = await res.json();
       setCompanies(prev => prev.map(c => c.id === id ? updated : c));
       setStats(s => s ? { ...s, pending_approvals: s.pending_approvals - 1, approved_companies: s.approved_companies + 1 } : s);
+      setActionSuccess('Company approved (DB only). Add the employer to quickjobs-employers in Cognito for login access.');
+    } else {
+      const body = await res.json().catch(() => ({}));
+      setActionError(body.detail || `Approve failed (${res.status}). Check company service logs.`);
     }
   }
 
   async function reject(id: string) {
+    setActionError(''); setActionSuccess('');
     const headers = await getAuthHeaders();
     const res = await fetch(`${COMPANY_URL}/admin/companies/${id}/reject`, { method: 'PATCH', headers });
     if (res.ok) {
       const updated: Company = await res.json();
       setCompanies(prev => prev.map(c => c.id === id ? updated : c));
       setStats(s => s ? { ...s, pending_approvals: Math.max(0, s.pending_approvals - 1) } : s);
+    } else {
+      const body = await res.json().catch(() => ({}));
+      setActionError(body.detail || `Reject failed (${res.status}).`);
     }
   }
 
   async function suspend(id: string) {
+    setActionError(''); setActionSuccess('');
     const headers = await getAuthHeaders();
     const res = await fetch(`${COMPANY_URL}/admin/companies/${id}/suspend`, { method: 'PATCH', headers });
     if (res.ok) {
       const updated: Company = await res.json();
       setCompanies(prev => prev.map(c => c.id === id ? updated : c));
+    } else {
+      const body = await res.json().catch(() => ({}));
+      setActionError(body.detail || `Suspend failed (${res.status}).`);
     }
   }
 
@@ -275,9 +295,25 @@ export default function AdminDashboard() {
         <main className="flex-1 overflow-y-auto" style={{ padding: '32px' }}>
 
           {error && (
-            <div className="flex items-center gap-2 mb-6 text-sm"
+            <div className="flex items-center gap-2 mb-4 text-sm"
               style={{ padding: '12px 16px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: '10px', color: '#B91C1C' }}>
               <AlertCircle size={15} /> {error}
+            </div>
+          )}
+
+          {actionError && (
+            <div className="flex items-center justify-between gap-2 mb-4 text-sm"
+              style={{ padding: '12px 16px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: '10px', color: '#B91C1C' }}>
+              <div className="flex items-center gap-2"><AlertCircle size={15} /> {actionError}</div>
+              <button onClick={() => setActionError('')} style={{ fontSize: '16px', lineHeight: 1, color: '#B91C1C' }}>×</button>
+            </div>
+          )}
+
+          {actionSuccess && (
+            <div className="flex items-center justify-between gap-2 mb-4 text-sm"
+              style={{ padding: '12px 16px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: '10px', color: '#15803D' }}>
+              <div className="flex items-center gap-2"><CheckCircle size={15} /> {actionSuccess}</div>
+              <button onClick={() => setActionSuccess('')} style={{ fontSize: '16px', lineHeight: 1, color: '#15803D' }}>×</button>
             </div>
           )}
 

@@ -357,7 +357,7 @@ def activate_company(
     """
     Approve a self-registered company AND add the employer to the
     quickjobs-employers Cognito group so they can log in immediately.
-    Falls back to status-only approval if Cognito assignment fails.
+    Returns 503 if the Cognito group assignment fails so the admin is informed.
     """
     company = db.query(Company).filter(Company.id == company_id).first()
     if not company:
@@ -372,7 +372,11 @@ def activate_company(
         )
         print(f"[INFO] Added {company.email} to quickjobs-employers Cognito group")
     except Exception as e:
-        print(f"[WARN] Cognito group assignment failed (activate manually if needed): {e}")
+        print(f"[ERROR] Cognito group assignment failed for {company.email}: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Cognito error: {e}. Use 'Approve' to update DB only and add the user to quickjobs-employers manually in AWS Console.",
+        )
 
     company.status = "APPROVED"
     db.commit()

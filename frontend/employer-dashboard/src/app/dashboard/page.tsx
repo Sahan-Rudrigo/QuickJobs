@@ -54,6 +54,7 @@ export default function DashboardPage() {
   const router = useRouter();
 
   const [userEmail, setUserEmail]       = useState('');
+  const [pendingApproval, setPendingApproval] = useState(false);
   const [company, setCompany]           = useState<Company | null>(null);
   const [view, setView]                 = useState('Overview');
   const [jobs, setJobs]                 = useState<Job[]>([]);
@@ -87,7 +88,9 @@ export default function DashboardPage() {
 
       const groups = (session.tokens?.accessToken?.payload['cognito:groups'] as string[]) || [];
       if (!groups.includes('quickjobs-employers')) {
-        router.push('/login');
+        setUserEmail(u.username);
+        setPendingApproval(true);
+        setInitLoading(false);
         return;
       }
 
@@ -224,6 +227,33 @@ export default function DashboardPage() {
             <span className="text-white font-bold text-sm">Q</span>
           </div>
           <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>Loading your dashboard…</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (pendingApproval) {
+    return (
+      <div className="flex h-screen items-center justify-center p-6" style={{ background: 'var(--bg-base)' }}>
+        <div className="w-full max-w-[440px] text-center">
+          <div className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-6" style={{ background: '#FFFBEB' }}>
+            <Clock size={30} style={{ color: '#D97706' }} />
+          </div>
+          <h1 className="font-semibold mb-2" style={{ fontSize: '22px', color: 'var(--text-primary)', letterSpacing: '-0.01em' }}>
+            Pending Admin Approval
+          </h1>
+          <p className="text-sm mb-2" style={{ color: 'var(--text-secondary)', lineHeight: '1.6' }}>
+            Your account (<strong>{userEmail}</strong>) is awaiting approval.
+          </p>
+          <p className="text-sm mb-8" style={{ color: 'var(--text-tertiary)', lineHeight: '1.6' }}>
+            An admin needs to activate your account before you can access the dashboard. You'll be able to log in once approved.
+          </p>
+          <button
+            onClick={async () => { const { signOut } = await import('aws-amplify/auth'); await signOut(); router.push('/login'); }}
+            className="text-sm font-medium"
+            style={{ padding: '10px 24px', background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', borderRadius: '10px', color: 'var(--text-secondary)' }}>
+            Sign Out
+          </button>
         </div>
       </div>
     );
