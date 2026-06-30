@@ -73,23 +73,30 @@ export default function DashboardPage() {
 
   useEffect(() => {
     async function init() {
+      // Auth check — redirect to login only if not authenticated or wrong group
+      let u, session;
       try {
-        const u = await getCurrentUser();
-        setUserEmail(u.username);
+        u = await getCurrentUser();
+        session = await fetchAuthSession();
+      } catch {
+        router.push('/login');
+        return;
+      }
 
-        // Cognito group check
-        const session = await fetchAuthSession();
-        const groups = (session.tokens?.accessToken?.payload['cognito:groups'] as string[]) || [];
-        if (!groups.includes('quickjobs-employers')) {
-          router.push('/login');
-          return;
-        }
+      setUserEmail(u.username);
 
+      const groups = (session.tokens?.accessToken?.payload['cognito:groups'] as string[]) || [];
+      if (!groups.includes('quickjobs-employers')) {
+        router.push('/login');
+        return;
+      }
+
+      // Company lookup — network errors here should not log the user out
+      try {
         const attrs = await fetchUserAttributes();
         const sub         = session.tokens?.accessToken?.payload['sub'] as string || u.username;
         const companyName = attrs.name || u.username.split('@')[0];
 
-        // Find or create company record
         let co: Company | null = null;
         const byUser = await fetch(`${COMPANY_URL}/companies/by-user/${sub}`);
         if (byUser.ok) {
@@ -108,7 +115,7 @@ export default function DashboardPage() {
           await loadJobs(co.id);
         }
       } catch {
-        router.push('/login');
+        // Company service unavailable — still show dashboard, just without company data
       } finally {
         setInitLoading(false);
       }
