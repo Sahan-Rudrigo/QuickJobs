@@ -64,7 +64,7 @@ export default function DashboardPage() {
   const [postSuccess, setPostSuccess]   = useState(false);
   const [postError, setPostError]       = useState('');
   const [initLoading, setInitLoading]   = useState(true);
-  const [jobsLoading, setJobsLoading]   = useState(false);
+  const [, setJobsLoading]              = useState(false);
 
   const [jobSearch, setJobSearch] = useState('');
 
@@ -272,7 +272,7 @@ export default function DashboardPage() {
             Your account (<strong>{userEmail}</strong>) is awaiting approval.
           </p>
           <p className="text-sm mb-8" style={{ color: 'var(--text-tertiary)', lineHeight: '1.6' }}>
-            An admin needs to activate your account before you can access the dashboard. You'll be able to log in once approved.
+            An admin needs to activate your account before you can access the dashboard. You&apos;ll be able to log in once approved.
           </p>
           <button
             onClick={async () => { const { signOut } = await import('aws-amplify/auth'); await signOut(); router.push('/login'); }}
