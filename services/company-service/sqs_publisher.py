@@ -22,6 +22,7 @@ def publish_job_matched(
     location: str,
     job_type: str,
     salary: str,
+    description: str,
     matched_phones: list,
 ) -> bool:
     """
@@ -40,6 +41,7 @@ def publish_job_matched(
         "location":      location or "",
         "job_type":      job_type or "",
         "salary":        salary or "",
+        "description":   description or "",
         "matched_phones": matched_phones,
     }
 

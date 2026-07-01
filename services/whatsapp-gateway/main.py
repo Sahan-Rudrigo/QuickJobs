@@ -28,7 +28,9 @@ async def verify_webhook(
 @app.post("/webhook")
 async def receive_message(request: Request):
     body = await request.json()
+    print(f"[DEBUG] Incoming webhook payload: {body}")
 
+    phone = None
     try:
         entry   = body.get("entry", [])[0]
         changes = entry.get("changes", [])[0]
@@ -82,6 +84,11 @@ async def receive_message(request: Request):
 
     except Exception:
         print("ERROR:", traceback.format_exc())
+        if phone:
+            try:
+                await send_text(phone, "❌ Something went wrong on our end. Please try again.")
+            except Exception:
+                print("ERROR: also failed to notify user of failure:", traceback.format_exc())
 
     return {"status": "ok"}
 

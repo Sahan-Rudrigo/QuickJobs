@@ -95,6 +95,70 @@ def test_delete_keyword_variants():
         assert any("CONFIRMING_DELETE" in str(c) for c in set_calls), f"Failed for: {keyword}"
 
 
+# ── Job-offer APPLY / SKIP ─────────────────────────────────────────────
+
+def _drive_offer(text, step="ACTIVE", data=None, pending_offer=None, next_offer=None, patch_status=200):
+    """Like drive(), but also mocks peek/pop_pending_offer and the PATCH decision call."""
+    mock_get  = MagicMock(return_value={"step": step, "data": data or {}})
+    mock_set  = MagicMock()
+    mock_send = AsyncMock()
+    mock_peek = MagicMock(side_effect=[pending_offer, next_offer])
+    mock_pop  = MagicMock(return_value=pending_offer)
+
+    mock_resp = MagicMock(status_code=patch_status)
+    mock_resp.json.return_value = {"status": "APPLIED", "job_title": "Dev", "company_name": "Acme"}
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__  = AsyncMock(return_value=False)
+    mock_client.patch = AsyncMock(return_value=mock_resp)
+
+    from state_machine import handle_message
+    with patch("state_machine.get_state", mock_get), \
+         patch("state_machine.set_state", mock_set), \
+         patch("state_machine.send_text", mock_send), \
+         patch("state_machine.peek_pending_offer", mock_peek), \
+         patch("state_machine.pop_pending_offer", mock_pop), \
+         patch("state_machine.httpx.AsyncClient", return_value=mock_client):
+        run(handle_message("94771234567", text))
+
+    return mock_set, mock_send, mock_client
+
+
+def test_apply_with_pending_offer_resolves_and_does_not_touch_state():
+    offer = {"job_id": "job-1", "job_title": "Dev", "company_name": "Acme"}
+    mock_set, mock_send, mock_client = _drive_offer("APPLY", step="ACTIVE", pending_offer=offer)
+
+    mock_client.patch.assert_called_once()
+    url = str(mock_client.patch.call_args)
+    assert "job-1" in url and "94771234567" in url
+    assert mock_client.patch.call_args.kwargs["json"] == {"decision": "APPLY"}
+    mock_set.assert_not_called()  # must resume whatever step the user was in
+    assert len(mock_send.call_args_list) == 1
+
+
+def test_skip_with_pending_offer_resolves():
+    offer = {"job_id": "job-1", "job_title": "Dev", "company_name": "Acme"}
+    mock_set, mock_send, mock_client = _drive_offer("SKIP", step="IDLE", pending_offer=offer)
+
+    assert mock_client.patch.call_args.kwargs["json"] == {"decision": "SKIP"}
+    mock_set.assert_not_called()
+
+
+def test_apply_no_pending_offer_falls_through_to_normal_dispatch():
+    """A stray APPLY with nothing pending must not silently do nothing."""
+    mock_set, mock_send, mock_client = _drive_offer("APPLY", step="ACTIVE", pending_offer=None)
+    mock_client.patch.assert_not_called()
+    assert len(mock_send.call_args_list) == 1  # falls through to ACTIVE_MENU
+
+
+def test_apply_with_second_offer_queued_sends_next_offer_prompt():
+    offer = {"job_id": "job-1", "job_title": "Dev", "company_name": "Acme"}
+    next_offer = {"job_id": "job-2", "job_title": "QA", "company_name": "Beta"}
+    _, mock_send, _ = _drive_offer("APPLY", step="ACTIVE", pending_offer=offer, next_offer=next_offer)
+    assert len(mock_send.call_args_list) == 2
+    assert "QA" in str(mock_send.call_args_list[1])
+
+
 # ── PDPA deletion confirmation ─────────────────────────────────────────
 
 def test_confirm_delete_triggers_deletion():
@@ -260,6 +324,87 @@ def test_active_option_1_enters_skill_update():
 def test_active_option_2_enters_location_update():
     set_calls, _ = drive("94771234567", "2", step="ACTIVE")
     assert any("UPDATING_LOCATION" in str(c) for c in set_calls)
+
+
+def _drive_applications(text, status_code=200, json_body=None):
+    mock_get  = MagicMock(return_value={"step": "ACTIVE", "data": {}})
+    mock_set  = MagicMock()
+    mock_send = AsyncMock()
+
+    mock_resp = MagicMock(status_code=status_code)
+    mock_resp.json.return_value = json_body or []
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__  = AsyncMock(return_value=False)
+    mock_client.get = AsyncMock(return_value=mock_resp)
+
+    from state_machine import handle_message
+    with patch("state_machine.get_state", mock_get), \
+         patch("state_machine.set_state", mock_set), \
+         patch("state_machine.send_text", mock_send), \
+         patch("state_machine.httpx.AsyncClient", return_value=mock_client):
+        run(handle_message("94771234567", text))
+
+    return mock_set, mock_send, mock_client
+
+
+def test_active_option_6_lists_applications():
+    mock_set, mock_send, mock_client = _drive_applications(
+        "6", json_body=[{"job_id": "job-1", "title": "Dev", "company_name": "Acme", "location": "Colombo", "salary": "100k"}]
+    )
+    mock_client.get.assert_called_once()
+    assert "status=APPLIED" in str(mock_client.get.call_args) or mock_client.get.call_args.kwargs.get("params") == {"status": "APPLIED"}
+    mock_set.assert_not_called()
+    assert "Dev" in str(mock_send.call_args_list[0])
+
+
+def test_active_option_7_with_rejected_jobs_enters_viewing_step():
+    mock_set, mock_send, _ = _drive_applications(
+        "7", json_body=[{"job_id": "job-1", "title": "Dev", "company_name": "Acme", "location": None, "salary": None}]
+    )
+    assert any("VIEWING_REJECTED" in str(c) for c in mock_set.call_args_list)
+    set_data = mock_set.call_args_list[0][0][2]
+    assert set_data["_rejected_job_ids"] == ["job-1"]
+
+
+def test_active_option_7_no_rejected_jobs():
+    mock_set, mock_send, _ = _drive_applications("7", json_body=[])
+    mock_set.assert_not_called()
+    assert len(mock_send.call_args_list) == 1
+
+
+def test_viewing_rejected_valid_choice_reapplies():
+    mock_resp = MagicMock(status_code=200)
+    mock_resp.json.return_value = {"status": "APPLIED", "job_title": "Dev", "company_name": "Acme"}
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__  = AsyncMock(return_value=False)
+    mock_client.patch = AsyncMock(return_value=mock_resp)
+
+    mock_get  = MagicMock(return_value={"step": "VIEWING_REJECTED", "data": {"_rejected_job_ids": ["job-1", "job-2"]}})
+    mock_set  = MagicMock()
+    mock_send = AsyncMock()
+
+    from state_machine import handle_message
+    with patch("state_machine.get_state", mock_get), \
+         patch("state_machine.set_state", mock_set), \
+         patch("state_machine.send_text", mock_send), \
+         patch("state_machine.httpx.AsyncClient", return_value=mock_client):
+        run(handle_message("94771234567", "2"))
+
+    mock_client.patch.assert_called_once()
+    assert "job-2" in str(mock_client.patch.call_args)
+    assert any("ACTIVE" in str(c) for c in mock_set.call_args_list)
+    set_data = mock_set.call_args_list[0][0][2]
+    assert "_rejected_job_ids" not in set_data
+
+
+def test_viewing_rejected_invalid_choice_reprompts():
+    set_calls, send_calls = drive(
+        "94771234567", "9", step="VIEWING_REJECTED", data={"_rejected_job_ids": ["job-1"]}
+    )
+    assert len(set_calls) == 0
+    assert len(send_calls) == 1
 
 
 # ── Profile update flow ───────────────────────────────────────────────

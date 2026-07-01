@@ -1,6 +1,6 @@
 import os
 import httpx
-from redis_client import get_state, set_state
+from redis_client import get_state, set_state, peek_pending_offer, pop_pending_offer
 from whatsapp_api import send_text
 import templates
 
@@ -14,14 +14,11 @@ UPDATE_FIELD_MAP = {
     "5": None,
 }
 
-USER_SERVICE_URL = os.getenv("USER_SERVICE_URL", "http://localhost:8001")
-FILE_SERVICE_URL = os.getenv("FILE_SERVICE_URL", "http://localhost:8002")
+USER_SERVICE_URL    = os.getenv("USER_SERVICE_URL", "http://localhost:8001")
+FILE_SERVICE_URL    = os.getenv("FILE_SERVICE_URL", "http://localhost:8002")
+COMPANY_SERVICE_URL = os.getenv("COMPANY_SERVICE_URL", "http://localhost:8003")
 
 _DELETE_KEYWORDS   = {"DELETE MY DATA", "DELETE DATA", "ERASE MY DATA", "ERASE DATA"}
-_ONBOARDING_STEPS  = {
-    "IDLE", "AWAITING_NAME", "AWAITING_SKILLS", "AWAITING_EXPERIENCE",
-    "AWAITING_LOCATION", "AWAITING_SALARY", "AWAITING_CV",
-}
 _RESTART_TRIGGERS  = {"hi", "hello", "register", "restart"}
 
 
@@ -67,6 +64,41 @@ async def _create_user_profile(phone: str, data: dict) -> None:
         print(f"[ERROR] Failed to create user profile for {phone}: {e}")
 
 
+async def _resolve_offer(phone: str, job_id: str, decision: str) -> dict:
+    """
+    Flip a JobApplication's status via Company Service.
+    Returns the response JSON (job_title, company_name, status) or {} on failure.
+    Used both for an immediate APPLY/SKIP reply and for the reapply flow.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.patch(
+                f"{COMPANY_SERVICE_URL}/jobs/{job_id}/applicants/{phone}",
+                json={"decision": decision},
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            print(f"[ERROR] resolve_offer {job_id}/{phone} returned {resp.status_code}: {resp.text}")
+    except Exception as e:
+        print(f"[ERROR] Failed to resolve offer for {phone}, job {job_id}: {e}")
+    return {}
+
+
+async def _fetch_applications(phone: str, status: str) -> list:
+    """Fetch a candidate's jobs by status (APPLIED or REJECTED) from Company Service."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{COMPANY_SERVICE_URL}/candidates/{phone}/applications",
+                params={"status": status},
+            )
+            if resp.status_code == 200:
+                return resp.json()
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch {status} applications for {phone}: {e}")
+    return []
+
+
 async def _delete_user_data(phone: str) -> None:
     """
     PDPA right-to-erasure: delete all data for a phone number across services.
@@ -110,11 +142,29 @@ async def handle_message(phone: str, text: str):
         return
 
     # ── Global restart ────────────────────────────────────────────
-    # "hi / hello / register / restart" restarts onboarding from any stuck state
-    if step in _ONBOARDING_STEPS and set(text.lower().split()) & _RESTART_TRIGGERS:
+    # "hi / hello / register / restart" restarts onboarding from any state,
+    # matching what every template advertises ("RESTART — Re-register from the beginning")
+    if set(text.lower().split()) & _RESTART_TRIGGERS:
         set_state(phone, "AWAITING_NAME", {})
         await send_text(phone, templates.WELCOME)
         return
+
+    # ── Job-offer APPLY / SKIP override ───────────────────────────
+    # Must NOT call set_state — resumes whatever step the user was already in.
+    if text.upper() in ("APPLY", "SKIP"):
+        offer = peek_pending_offer(phone)
+        if offer:
+            pop_pending_offer(phone)
+            decision = "APPLY" if text.upper() == "APPLY" else "SKIP"
+            result = await _resolve_offer(phone, offer["job_id"], decision)
+            await send_text(phone, templates.offer_resolved(decision, result))
+
+            next_offer = peek_pending_offer(phone)
+            if next_offer:
+                await send_text(phone, templates.next_offer_waiting(next_offer["job_title"], next_offer["company_name"]))
+            return
+        # no pending offer: fall through to normal step dispatch below —
+        # a stray "apply"/"skip" with nothing pending must not do nothing.
 
     # ── Deletion confirmation state ───────────────────────────────
     if step == "CONFIRMING_DELETE":
@@ -181,6 +231,17 @@ async def handle_message(phone: str, text: str):
         if text == "5":
             set_state(phone, "OPTED_OUT", data)
             await send_text(phone, templates.OPT_OUT_CONFIRM)
+        elif text == "6":
+            apps = await _fetch_applications(phone, "APPLIED")
+            await send_text(phone, templates.applications_list(apps))
+        elif text == "7":
+            rejected = await _fetch_applications(phone, "REJECTED")
+            if not rejected:
+                await send_text(phone, templates.NO_REJECTED_JOBS)
+            else:
+                data["_rejected_job_ids"] = [j["job_id"] for j in rejected]
+                set_state(phone, "VIEWING_REJECTED", data)
+                await send_text(phone, templates.rejected_jobs_list(rejected))
         elif text in UPDATE_FIELD_MAP and UPDATE_FIELD_MAP[text] is not None:
             field, next_step = UPDATE_FIELD_MAP[text]
             data["_updating_field"] = field
@@ -263,6 +324,20 @@ async def handle_message(phone: str, text: str):
             field   = data.get("_updating_field", "field")
             display = data.get("_pending_display", "")
             await send_text(phone, templates.confirm_update(field, display))
+
+    elif step == "VIEWING_REJECTED":
+        ids = data.get("_rejected_job_ids", [])
+        idx = int(text) - 1 if text.isdigit() else -1
+        if not (0 <= idx < len(ids)):
+            await send_text(phone, templates.INVALID_LIST_CHOICE)
+            return
+        result = await _resolve_offer(phone, ids[idx], "APPLY")  # reapply = APPLY on a REJECTED row
+        data.pop("_rejected_job_ids", None)
+        set_state(phone, "ACTIVE", data)
+        if result:
+            await send_text(phone, templates.reapplied_confirm(result["job_title"], result["company_name"]))
+        else:
+            await send_text(phone, templates.REAPPLY_FAILED)
 
     elif step == "OPTED_OUT":
         await send_text(phone, "You are unsubscribed. Send *START* to re-subscribe.")

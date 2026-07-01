@@ -2,6 +2,7 @@
 Notification Service — unit tests.
 All external I/O (Redis, SQS, Meta API) is mocked.
 """
+import json
 import pytest
 from unittest.mock import patch, MagicMock, call
 
@@ -72,6 +73,17 @@ def test_mark_notified_sets_redis_key_with_ttl(mock_redis_client, mock_boto_clie
     assert args[0] == "notified:job-1:94771234567"
     assert args[1] > 0        # TTL is set
     assert args[2] == "1"
+
+
+def test_push_pending_offer_rpushes_and_expires(mock_redis_client, mock_boto_client):
+    m = _fresh_consumer()
+    m._push_pending_offer("94771234567", "job-1", "Dev", "Acme")
+    m._redis.rpush.assert_called_once()
+    key, entry = m._redis.rpush.call_args[0]
+    assert key == "pending_offers:94771234567"
+    payload = json.loads(entry)
+    assert payload == {"job_id": "job-1", "job_title": "Dev", "company_name": "Acme"}
+    m._redis.expire.assert_called_once_with("pending_offers:94771234567", m._DEDUP_TTL)
 
 
 # ── _build_message ────────────────────────────────────────────────────────────
@@ -166,6 +178,7 @@ def test_process_job_matched_sends_to_opted_in(mock_post, mock_redis_client, moc
         "matched_phones": ["94771111111", "94772222222"],
     })
     assert mock_post.call_count == 2
+    assert m._redis.rpush.call_count == 2
 
 
 def test_process_job_matched_skips_opted_out(mock_redis_client, mock_boto_client):

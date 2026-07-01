@@ -61,7 +61,9 @@ def onboarding_complete(name: str) -> str:
         "2️⃣ Update Location\n"
         "3️⃣ Update Salary\n"
         "4️⃣ Upload New CV\n"
-        "5️⃣ Stop Alerts\n\n"
+        "5️⃣ Stop Alerts\n"
+        "6️⃣ My Applications\n"
+        "7️⃣ Rejected Jobs\n\n"
         "*Other commands:*\n"
         "🔄 *RESTART* — Re-register from the beginning\n"
         "🔕 *STOP* — Unsubscribe from alerts\n"
@@ -77,7 +79,9 @@ ACTIVE_MENU = (
     "2️⃣ Update Location\n"
     "3️⃣ Update Salary\n"
     "4️⃣ Upload New CV\n"
-    "5️⃣ Stop Alerts\n\n"
+    "5️⃣ Stop Alerts\n"
+    "6️⃣ My Applications\n"
+    "7️⃣ Rejected Jobs\n\n"
     "*Other commands:*\n"
     "🔄 *RESTART* — Re-register from the beginning\n"
     "🔕 *STOP* — Unsubscribe from alerts\n"
@@ -150,3 +154,58 @@ DATA_DELETED_CONFIRM = (
 )
 
 DATA_DELETE_CANCELLED = "✅ Deletion cancelled. Your data is safe."
+
+# ── Job-offer APPLY / SKIP ─────────────────────────────────────────
+
+def offer_resolved(decision: str, result: dict) -> str:
+    title   = result.get("job_title", "the job")
+    company = result.get("company_name", "")
+    if decision == "APPLY":
+        return f"✅ You've applied for *{title}* at *{company}*! The employer can now see your profile."
+    return (
+        f"👍 No problem — you've skipped *{title}* at *{company}*.\n\n"
+        "You can find it again anytime under *Rejected Jobs* and reapply."
+    )
+
+
+def next_offer_waiting(job_title: str, company_name: str) -> str:
+    return (
+        f"📬 You also have another match waiting: *{job_title}* at *{company_name}*.\n\n"
+        "Reply *APPLY* or *SKIP* to respond."
+    )
+
+
+# ── My Applications / Rejected Jobs ────────────────────────────────
+
+def _format_job_line(index: int, job: dict) -> str:
+    parts = [f"*{job['title']}*", f"🏢 {job['company_name']}"]
+    if job.get("location"):
+        parts.append(f"📍 {job['location']}")
+    if job.get("salary"):
+        parts.append(f"💰 {job['salary']}")
+    return f"{index}. " + " — ".join(parts)
+
+
+def applications_list(apps: list) -> str:
+    if not apps:
+        return "📋 *My Applications*\n\nYou haven't applied to any jobs yet."
+    lines = ["📋 *My Applications*\n"] + [_format_job_line(i, j) for i, j in enumerate(apps, 1)]
+    return "\n".join(lines)
+
+
+def rejected_jobs_list(rejected: list) -> str:
+    lines = ["🗂️ *Rejected Jobs*\n"] + [_format_job_line(i, j) for i, j in enumerate(rejected, 1)]
+    lines.append("\n_Reply with a number to reapply for that job._")
+    return "\n".join(lines)
+
+
+NO_REJECTED_JOBS = "🗂️ *Rejected Jobs*\n\nYou haven't skipped any job matches."
+
+INVALID_LIST_CHOICE = "Please reply with a valid number from the list above."
+
+
+def reapplied_confirm(job_title: str, company_name: str) -> str:
+    return f"✅ You've reapplied for *{job_title}* at *{company_name}*! The employer can now see your profile."
+
+
+REAPPLY_FAILED = "❌ Something went wrong while reapplying. Please try again shortly."

@@ -4,13 +4,14 @@ import os
 import boto3
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
+from sqlalchemy.sql import func
 from typing import List, Optional
 
 COGNITO_POOL_ID = os.getenv("COGNITO_POOL_ID", "ap-south-1_0qt4DZnx6")
 COGNITO_REGION  = os.getenv("COGNITO_REGION",  "ap-south-1")
 
 from database import get_db
-from models import Company, Job, JobMatch
+from models import Company, Job, JobApplication
 from schemas import (
     CompanyCreate, CompanyResponse,
     JobCreate, JobResponse,
@@ -82,6 +83,24 @@ def _fetch_candidate_profile(phone: str) -> Optional[CandidateProfile]:
     except Exception as e:
         print(f"[WARN] Could not fetch profile for {phone}: {e}")
     return CandidateProfile(phone=phone)
+
+
+def _create_notified_applications(db: Session, job_id: str, phones: list) -> list:
+    """
+    Insert a NOTIFIED JobApplication row for each phone that doesn't already
+    have one for this job. Returns only the phones that were newly inserted —
+    dedups repeat forward/reverse matches for the same (job_id, phone) pair.
+    """
+    existing = {
+        row.phone for row in
+        db.query(JobApplication.phone).filter(JobApplication.job_id == job_id).all()
+    }
+    new_phones = [p for p in phones if p not in existing]
+    for phone in new_phones:
+        db.add(JobApplication(job_id=job_id, phone=phone, status="NOTIFIED"))
+    if new_phones:
+        db.commit()
+    return new_phones
 
 
 # ── Company endpoints ─────────────────────────────────────────────────────────
@@ -199,20 +218,18 @@ def post_job(
     )
 
     if matched_phones:
-        job.applications = len(matched_phones)
-        db.add(JobMatch(job_id=job_id, matched_phones=matched_phones))
-        db.commit()
-        db.refresh(job)
-
-        publish_job_matched(
-            job_id=job_id,
-            job_title=payload.title,
-            company_name=company.name,
-            location=payload.location or "",
-            job_type=payload.job_type or "",
-            salary=payload.salary or "",
-            matched_phones=matched_phones,
-        )
+        newly_notified = _create_notified_applications(db, job_id, matched_phones)
+        if newly_notified:
+            publish_job_matched(
+                job_id=job_id,
+                job_title=payload.title,
+                company_name=company.name,
+                location=payload.location or "",
+                job_type=payload.job_type or "",
+                salary=payload.salary or "",
+                description=payload.description or "",
+                matched_phones=newly_notified,
+            )
 
     return job
 
@@ -245,7 +262,7 @@ def delete_job(job_id: str, db: Session = Depends(get_db)):
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    db.query(JobMatch).filter(JobMatch.job_id == job_id).delete()
+    db.query(JobApplication).filter(JobApplication.job_id == job_id).delete()
     db.delete(job)
     db.commit()
     try:
@@ -257,12 +274,17 @@ def delete_job(job_id: str, db: Session = Depends(get_db)):
 
 @router.get("/jobs/{job_id}/matches", response_model=JobMatchResponse)
 def get_job_matches(job_id: str, db: Session = Depends(get_db)):
-    """Return matched candidates enriched with profiles from user service."""
-    match = db.query(JobMatch).filter(JobMatch.job_id == job_id).first()
-    if not match:
-        return JobMatchResponse(job_id=job_id, matched_phones=[], total_matches=0, candidates=[])
-
-    phones     = match.matched_phones or []
+    """
+    Return candidates enriched with profiles from user service.
+    Only candidates who explicitly APPLIED are returned — a candidate merely
+    notified of the match is not visible to the employer until they consent.
+    """
+    rows = (
+        db.query(JobApplication)
+        .filter(JobApplication.job_id == job_id, JobApplication.status == "APPLIED")
+        .all()
+    )
+    phones     = [r.phone for r in rows]
     candidates = [_fetch_candidate_profile(p) for p in phones]
 
     return JobMatchResponse(
@@ -277,33 +299,100 @@ def get_job_matches(job_id: str, db: Session = Depends(get_db)):
 
 from pydantic import BaseModel as _BaseModel
 
-class _ApplicantAdd(_BaseModel):
-    phone: str
+class _NotifyMatchRequest(_BaseModel):
+    phones: List[str]
 
 
-@router.post("/jobs/{job_id}/applicants")
-def add_applicant(job_id: str, payload: _ApplicantAdd, db: Session = Depends(get_db)):
+@router.post("/jobs/{job_id}/notify-match")
+def notify_match(job_id: str, payload: _NotifyMatchRequest, db: Session = Depends(get_db)):
     """
-    Add a reverse-matched candidate to a job's applicant list.
+    Record reverse-matched candidates as NOTIFIED and trigger the same
+    job-matched SQS publish used by forward matching, so they get a WhatsApp
+    offer and must APPLY before appearing to the employer.
     Called by Matching Service when a new CV matches an active job.
-    Idempotent — won't add duplicates.
     """
     job = db.query(Job).filter(Job.id == job_id, Job.status == "Active").first()
     if not job:
         return {"status": "skipped", "reason": "job not found or closed"}
 
-    match = db.query(JobMatch).filter(JobMatch.job_id == job_id).first()
-    if not match:
-        match = JobMatch(job_id=job_id, matched_phones=[payload.phone])
-        db.add(match)
-    elif payload.phone in (match.matched_phones or []):
-        return {"status": "already_matched"}
-    else:
-        match.matched_phones = (match.matched_phones or []) + [payload.phone]
+    newly_notified = _create_notified_applications(db, job_id, payload.phones)
+    if newly_notified:
+        publish_job_matched(
+            job_id=job_id,
+            job_title=job.title,
+            company_name=job.company_name,
+            location=job.location or "",
+            job_type=job.job_type or "",
+            salary=job.salary or "",
+            description=job.description or "",
+            matched_phones=newly_notified,
+        )
+    return {"status": "ok", "job_id": job_id, "notified": newly_notified}
 
-    job.applications = len(match.matched_phones)
-    db.commit()
-    return {"status": "added", "job_id": job_id, "phone": payload.phone}
+
+class _DecisionRequest(_BaseModel):
+    decision: str  # "APPLY" | "SKIP"
+
+
+@router.patch("/jobs/{job_id}/applicants/{phone}")
+def decide_application(job_id: str, phone: str, payload: _DecisionRequest, db: Session = Depends(get_db)):
+    """
+    Record a candidate's APPLY/SKIP decision for a job they were notified about.
+    Also used for "reapply" — a REJECTED row can transition back to APPLIED.
+    Called by WhatsApp Gateway when the candidate replies APPLY or SKIP.
+    """
+    app_row = db.query(JobApplication).filter_by(job_id=job_id, phone=phone).first()
+    job     = db.query(Job).filter(Job.id == job_id).first()
+    if not app_row or not job:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    target = "APPLIED" if payload.decision.upper() == "APPLY" else "REJECTED"
+
+    # NOTIFIED -> APPLIED/REJECTED (first response), or REJECTED -> APPLIED
+    # (reapply). Any other transition is an idempotent no-op.
+    if app_row.status == "NOTIFIED" or (app_row.status == "REJECTED" and target == "APPLIED"):
+        app_row.status       = target
+        app_row.responded_at = func.now()
+        db.flush()  # session has autoflush=False — the count below must see this pending status change
+        job.applications = (
+            db.query(JobApplication)
+            .filter_by(job_id=job_id, status="APPLIED")
+            .count()
+        )
+        db.commit()
+
+    return {
+        "status":       app_row.status,
+        "job_id":       job_id,
+        "phone":        phone,
+        "job_title":    job.title,
+        "company_name": job.company_name,
+    }
+
+
+@router.get("/candidates/{phone}/applications")
+def get_candidate_applications(phone: str, status: str, db: Session = Depends(get_db)):
+    """
+    Return a candidate's own jobs filtered by status (APPLIED or REJECTED).
+    Called by WhatsApp Gateway for the "My Applications"/"Rejected Jobs" menu.
+    """
+    rows = (
+        db.query(JobApplication, Job)
+        .join(Job, Job.id == JobApplication.job_id)
+        .filter(JobApplication.phone == phone, JobApplication.status == status.upper())
+        .order_by(JobApplication.responded_at.desc())
+        .all()
+    )
+    return [
+        {
+            "job_id":       job.id,
+            "title":        job.title,
+            "company_name": job.company_name,
+            "location":     job.location,
+            "salary":       job.salary,
+        }
+        for _app, job in rows
+    ]
 
 
 # ── Admin endpoints ───────────────────────────────────────────────────────────
@@ -440,7 +529,7 @@ def admin_stats(
     """Platform-wide KPIs for the admin panel overview."""
     all_companies = db.query(Company).all()
     all_jobs      = db.query(Job).all()
-    total_matches = db.query(JobMatch).count()
+    total_matches = db.query(JobApplication).count()
 
     return AdminStats(
         total_companies=len(all_companies),

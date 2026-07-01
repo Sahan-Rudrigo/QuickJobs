@@ -40,7 +40,18 @@ def _mark_notified(job_id: str, phone: str) -> None:
     _redis.setex(f"notified:{job_id}:{phone}", _DEDUP_TTL, "1")
 
 
-def _build_message(job_title: str, company_name: str, location: str, job_type: str, salary: str) -> str:
+def _push_pending_offer(phone: str, job_id: str, job_title: str, company_name: str) -> None:
+    """
+    Queue this job offer for WhatsApp Gateway to resolve when the candidate
+    replies APPLY/SKIP. FIFO — Gateway always resolves the oldest unresolved
+    offer first, so offers sent close together don't overwrite each other.
+    """
+    entry = json.dumps({"job_id": job_id, "job_title": job_title, "company_name": company_name})
+    _redis.rpush(f"pending_offers:{phone}", entry)
+    _redis.expire(f"pending_offers:{phone}", _DEDUP_TTL)
+
+
+def _build_message(job_title: str, company_name: str, location: str, job_type: str, salary: str, description: str = "") -> str:
     lines = [
         "🎉 *New Job Match on QuickJobs!*\n",
         f"*{job_title}*",
@@ -52,7 +63,9 @@ def _build_message(job_title: str, company_name: str, location: str, job_type: s
         lines.append(f"💼 {job_type}")
     if salary:
         lines.append(f"💰 {salary}")
-    lines.append("\nThis listing matches your skills and experience.")
+    if description:
+        lines.append(f"\n📝 {description[:400]}")
+    lines.append("\nReply *APPLY* to let the employer see your profile, or *SKIP* to pass on this one.")
     lines.append("\n_Send *STOP* to unsubscribe from alerts._")
     return "\n".join(lines)
 
@@ -94,13 +107,14 @@ def process_job_matched(body: dict) -> None:
     location     = body.get("location", "")
     job_type     = body.get("job_type", "")
     salary       = body.get("salary", "")
+    description  = body.get("description", "")
     phones       = body.get("matched_phones", [])
 
     if not phones:
         print(f"[INFO] No matched phones for job {job_id}")
         return
 
-    message = _build_message(job_title, company_name, location, job_type, salary)
+    message = _build_message(job_title, company_name, location, job_type, salary, description)
     sent = skipped_opted_out = skipped_duplicate = 0
 
     for phone in phones:
@@ -114,6 +128,7 @@ def process_job_matched(body: dict) -> None:
 
         if _send_whatsapp(phone, message):
             _mark_notified(job_id, phone)
+            _push_pending_offer(phone, job_id, job_title, company_name)
             sent += 1
 
     print(

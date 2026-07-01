@@ -21,14 +21,15 @@ COMPANY_SERVICE_URL  = os.getenv("COMPANY_SERVICE_URL", "http://localhost:8003")
 
 def _notify_company_service(phone: str, job_ids: list) -> None:
     """
-    For each matched job, tell Company Service to add this candidate as an applicant.
-    This enables the employer to see new reverse-matched candidates in their dashboard.
+    For each matched job, tell Company Service to notify this candidate.
+    Company Service records them as NOTIFIED and sends a WhatsApp offer —
+    they only become visible to the employer once they reply APPLY.
     """
     for job_id in job_ids:
         try:
             httpx.post(
-                f"{COMPANY_SERVICE_URL}/jobs/{job_id}/applicants",
-                json={"phone": phone},
+                f"{COMPANY_SERVICE_URL}/jobs/{job_id}/notify-match",
+                json={"phones": [phone]},
                 timeout=5,
             )
         except Exception as e:
@@ -89,22 +90,26 @@ def poll_cv_queue():
             time.sleep(5)
             continue
 
-        response = sqs.receive_message(
-            QueueUrl=CV_QUEUE_URL,
-            MaxNumberOfMessages=10,
-            WaitTimeSeconds=20,
-        )
+        try:
+            response = sqs.receive_message(
+                QueueUrl=CV_QUEUE_URL,
+                MaxNumberOfMessages=10,
+                WaitTimeSeconds=20,
+            )
 
-        for msg in response.get("Messages", []):
-            try:
-                body = json.loads(msg["Body"])
-                process_cv_uploaded(body)
-                sqs.delete_message(
-                    QueueUrl=CV_QUEUE_URL,
-                    ReceiptHandle=msg["ReceiptHandle"]
-                )
-            except Exception as e:
-                print(f"[ERROR] Failed to process message: {e}")
+            for msg in response.get("Messages", []):
+                try:
+                    body = json.loads(msg["Body"])
+                    process_cv_uploaded(body)
+                    sqs.delete_message(
+                        QueueUrl=CV_QUEUE_URL,
+                        ReceiptHandle=msg["ReceiptHandle"]
+                    )
+                except Exception as e:
+                    print(f"[ERROR] Failed to process message: {e}")
+        except Exception as e:
+            print(f"[ERROR] SQS poll error: {e}")
+            time.sleep(5)
 
         time.sleep(1)
 

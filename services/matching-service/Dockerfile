@@ -1,5 +1,6 @@
 # Use official Python 3.11 slim image
 FROM python:3.11-slim
+ENV PYTHONUNBUFFERED=1
 
 # Set working directory inside container
 WORKDIR /app
