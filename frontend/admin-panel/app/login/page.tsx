@@ -6,6 +6,10 @@ import { signIn, confirmSignIn, resetPassword, confirmResetPassword } from 'aws-
 import { useRouter } from 'next/navigation';
 import { ShieldCheck, Eye, EyeOff, AlertCircle } from 'lucide-react';
 
+function getErrorMessage(err: unknown): string | undefined {
+  return err instanceof Error ? err.message : undefined;
+}
+
 export default function AdminLoginPage() {
   const router = useRouter();
   const [email, setEmail]                             = useState('');
@@ -30,8 +34,8 @@ export default function AdminLoginPage() {
       } else {
         router.push('/dashboard');
       }
-    } catch (err: any) {
-      setError(err.message || 'Login failed. Please check your credentials.');
+    } catch (err) {
+      setError(getErrorMessage(err) || 'Login failed. Please check your credentials.');
     } finally { setLoading(false); }
   };
 
@@ -41,8 +45,8 @@ export default function AdminLoginPage() {
     try {
       await confirmSignIn({ challengeResponse: newPassword });
       router.push('/dashboard');
-    } catch (err: any) {
-      setError(err.message || 'Failed to set new password.');
+    } catch (err) {
+      setError(getErrorMessage(err) || 'Failed to set new password.');
     } finally { setLoading(false); }
   };
 
@@ -52,8 +56,8 @@ export default function AdminLoginPage() {
     try {
       await resetPassword({ username: email });
       setResetCodeSent(true);
-    } catch (err: any) {
-      setError(err.message || 'Could not send reset code.');
+    } catch (err) {
+      setError(getErrorMessage(err) || 'Could not send reset code.');
     } finally { setLoading(false); }
   };
 
@@ -63,8 +67,8 @@ export default function AdminLoginPage() {
     try {
       await confirmResetPassword({ username: email, confirmationCode: resetCode, newPassword: newPasswordReset });
       setForgotMode(false); setResetCodeSent(false); setError('');
-    } catch (err: any) {
-      setError(err.message || 'Could not reset password.');
+    } catch (err) {
+      setError(getErrorMessage(err) || 'Could not reset password.');
     } finally { setLoading(false); }
   };
 

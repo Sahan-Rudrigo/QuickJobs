@@ -70,6 +70,7 @@ export default function AdminDashboard() {
       }
     }
     init();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router]);
 
   async function getAuthHeaders(): Promise<HeadersInit> {
@@ -97,7 +98,7 @@ export default function AdminDashboard() {
       if (jRes.ok) setJobs(await jRes.json());
       if (uRes.ok) setUsers(await uRes.json());
       if (sRes.ok) setStats(await sRes.json());
-    } catch (e) {
+    } catch {
       setError('Could not reach backend services. Make sure they are running.');
     } finally {
       setLoading(false);
