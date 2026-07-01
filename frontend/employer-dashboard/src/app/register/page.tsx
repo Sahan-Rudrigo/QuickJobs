@@ -34,8 +34,8 @@ export default function RegisterPage() {
         },
       });
       setStep('verify');
-    } catch (err: any) {
-      setError(err.message || 'Sign-up failed. Please try again.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Sign-up failed. Please try again.');
     } finally { setLoading(false); }
   };
 
@@ -57,8 +57,8 @@ export default function RegisterPage() {
       });
 
       setStep('done');
-    } catch (err: any) {
-      setError(err.message || 'Verification failed. Check your code and try again.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Verification failed. Check your code and try again.');
     } finally { setLoading(false); }
   };
 
@@ -135,13 +135,13 @@ export default function RegisterPage() {
               <CheckCircle size={28} style={{ color: '#16A34A' }} />
             </div>
             <h1 className="font-semibold mb-2" style={{ fontSize: '22px', color: 'var(--text-primary)', letterSpacing: '-0.01em' }}>
-              You're registered!
+              You&apos;re registered!
             </h1>
             <p className="text-sm mb-2 mx-auto max-w-xs" style={{ color: 'var(--text-secondary)', lineHeight: '1.6' }}>
               Your company account has been created and is <strong>pending admin approval.</strong>
             </p>
             <p className="text-sm mb-8 mx-auto max-w-xs" style={{ color: 'var(--text-tertiary)', lineHeight: '1.6' }}>
-              Once approved you'll be able to post jobs and receive AI-matched candidates.
+              Once approved you&apos;ll be able to post jobs and receive AI-matched candidates.
               An admin will also activate your login access.
             </p>
             <button onClick={() => router.push('/login')} className="text-white text-sm font-medium"
