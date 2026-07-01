@@ -103,7 +103,8 @@ export default function DashboardPage() {
         const companyName = attrs.name || email.split('@')[0];
 
         let co: Company | null = null;
-        const byUser = await fetch(`${COMPANY_URL}/companies/by-user/${sub}`);
+        const authHeaders = { Authorization: `Bearer ${session.tokens?.accessToken?.toString()}` };
+        const byUser = await fetch(`${COMPANY_URL}/companies/by-user/${sub}`, { headers: authHeaders });
         if (byUser.ok) {
           co = await byUser.json();
         } else {
@@ -131,7 +132,7 @@ export default function DashboardPage() {
   async function loadJobs(companyId: string) {
     setJobsLoading(true);
     try {
-      const res = await fetch(`${COMPANY_URL}/companies/${companyId}/jobs`);
+      const res = await fetch(`${COMPANY_URL}/companies/${companyId}/jobs`, { headers: await getAuthHeaders() });
       if (res.ok) setJobs(await res.json());
     } finally {
       setJobsLoading(false);
@@ -210,7 +211,7 @@ export default function DashboardPage() {
     setCandidatesLoading(true);
     setCandidates([]);
     try {
-      const res = await fetch(`${COMPANY_URL}/jobs/${jobId}/matches`);
+      const res = await fetch(`${COMPANY_URL}/jobs/${jobId}/matches`, { headers: await getAuthHeaders() });
       if (res.ok) {
         const data = await res.json();
         setCandidates(data.candidates || []);
@@ -756,7 +757,7 @@ export default function DashboardPage() {
                           {c.cv_s3_key && (
                             <button
                               onClick={async () => {
-                                const res = await fetch(`${FILE_URL}/cv/${c.phone}/latest/download`);
+                                const res = await fetch(`${FILE_URL}/cv/${c.phone}/latest/download`, { headers: await getAuthHeaders() });
                                 if (res.ok) {
                                   const data = await res.json();
                                   window.open(data.download_url, '_blank');
