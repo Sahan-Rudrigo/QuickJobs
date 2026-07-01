@@ -52,7 +52,7 @@ def clean_db():
     Base.metadata.create_all(bind=engine)
     yield
     with engine.connect() as conn:
-        conn.execute(text("DELETE FROM job_matches"))
+        conn.execute(text("DELETE FROM job_applications"))
         conn.execute(text("DELETE FROM jobs"))
         conn.execute(text("DELETE FROM companies"))
         conn.commit()
@@ -175,7 +175,11 @@ def test_post_job_approved_company(mock_match, mock_sqs):
 @patch("routes.publish_job_matched")
 @patch("routes._call_matching_service", return_value=["94771234567", "94779876543"])
 def test_post_job_with_matches(mock_match, mock_sqs):
-    """When matching returns phones, applications count is updated and SQS published."""
+    """
+    When matching returns phones, they're recorded as NOTIFIED and an SQS
+    event is published — but applications count stays 0 until someone
+    actually applies (consent-based visibility).
+    """
     company = client.post("/companies", json={
         "name": "Acme Corp", "email": "acme@test.com",
         "cognito_user_id": "sub-acme",
@@ -188,8 +192,12 @@ def test_post_job_with_matches(mock_match, mock_sqs):
         "skills": ["Python"],
     })
     assert res.status_code == 200
-    assert res.json()["applications"] == 2
+    job = res.json()
+    assert job["applications"] == 0
     mock_sqs.assert_called_once()
+
+    matches = client.get(f"/jobs/{job['id']}/matches").json()
+    assert matches["total_matches"] == 0  # NOTIFIED, not APPLIED yet
 
 
 @patch("routes.publish_job_matched")
@@ -325,11 +333,11 @@ def test_admin_stats():
     assert data["approved_companies"] >= 1
 
 
-# ── Reverse matching (applicant add) ─────────────────────────────────────────
+# ── Reverse matching (notify-match) ───────────────────────────────────────────
 
 @patch("routes.publish_job_matched")
 @patch("routes._call_matching_service", return_value=[])
-def test_add_applicant_to_job(mock_match, mock_sqs):
+def test_notify_match_creates_notified_row(mock_match, mock_sqs):
     company = client.post("/companies", json={
         "name": "Acme Corp", "email": "acme@test.com",
         "cognito_user_id": "sub-acme",
@@ -341,18 +349,22 @@ def test_add_applicant_to_job(mock_match, mock_sqs):
         "job_type": "Full-time", "description": "test",
     }).json()
 
-    res = client.post(f"/jobs/{job['id']}/applicants", json={"phone": "94771234567"})
+    res = client.post(f"/jobs/{job['id']}/notify-match", json={"phones": ["94771234567"]})
     assert res.status_code == 200
-    assert res.json()["status"] == "added"
+    assert res.json()["notified"] == ["94771234567"]
+    mock_sqs.assert_called_once()
 
+    # Not visible to the employer yet — only NOTIFIED, not APPLIED.
     updated = client.get(f"/companies/{company['id']}/jobs").json()
-    assert updated[0]["applications"] == 1
+    assert updated[0]["applications"] == 0
+    matches = client.get(f"/jobs/{job['id']}/matches").json()
+    assert matches["total_matches"] == 0
 
 
 @patch("routes.publish_job_matched")
 @patch("routes._call_matching_service", return_value=[])
-def test_add_applicant_idempotent(mock_match, mock_sqs):
-    """Adding the same phone twice doesn't duplicate."""
+def test_notify_match_idempotent(mock_match, mock_sqs):
+    """Notifying the same phone twice for the same job doesn't duplicate or re-publish."""
     company = client.post("/companies", json={
         "name": "Acme Corp", "email": "acme@test.com",
         "cognito_user_id": "sub-acme",
@@ -364,9 +376,68 @@ def test_add_applicant_idempotent(mock_match, mock_sqs):
         "job_type": "Full-time", "description": "test",
     }).json()
 
-    client.post(f"/jobs/{job['id']}/applicants", json={"phone": "94771234567"})
-    res = client.post(f"/jobs/{job['id']}/applicants", json={"phone": "94771234567"})
-    assert res.json()["status"] == "already_matched"
+    client.post(f"/jobs/{job['id']}/notify-match", json={"phones": ["94771234567"]})
+    res = client.post(f"/jobs/{job['id']}/notify-match", json={"phones": ["94771234567"]})
+    assert res.json()["notified"] == []
+    mock_sqs.assert_called_once()  # only the first call published
+
+
+@patch("routes.publish_job_matched")
+@patch("routes._call_matching_service", return_value=[])
+def test_decide_application_apply_makes_candidate_visible(mock_match, mock_sqs):
+    company = client.post("/companies", json={
+        "name": "Acme Corp", "email": "acme@test.com",
+        "cognito_user_id": "sub-acme",
+    }).json()
+    client.patch(f"/admin/companies/{company['id']}/approve")
+
+    job = client.post(f"/companies/{company['id']}/jobs", json={
+        "title": "Dev", "location": "Colombo",
+        "job_type": "Full-time", "description": "test",
+    }).json()
+    client.post(f"/jobs/{job['id']}/notify-match", json={"phones": ["94771234567"]})
+
+    res = client.patch(f"/jobs/{job['id']}/applicants/94771234567", json={"decision": "APPLY"})
+    assert res.status_code == 200
+    assert res.json()["status"] == "APPLIED"
+
+    matches = client.get(f"/jobs/{job['id']}/matches").json()
+    assert matches["total_matches"] == 1
+    assert matches["matched_phones"] == ["94771234567"]
 
     updated = client.get(f"/companies/{company['id']}/jobs").json()
     assert updated[0]["applications"] == 1
+
+
+@patch("routes.publish_job_matched")
+@patch("routes._call_matching_service", return_value=[])
+def test_decide_application_skip_then_reapply(mock_match, mock_sqs):
+    company = client.post("/companies", json={
+        "name": "Acme Corp", "email": "acme@test.com",
+        "cognito_user_id": "sub-acme",
+    }).json()
+    client.patch(f"/admin/companies/{company['id']}/approve")
+
+    job = client.post(f"/companies/{company['id']}/jobs", json={
+        "title": "Dev", "location": "Colombo",
+        "job_type": "Full-time", "description": "test",
+    }).json()
+    client.post(f"/jobs/{job['id']}/notify-match", json={"phones": ["94771234567"]})
+
+    res = client.patch(f"/jobs/{job['id']}/applicants/94771234567", json={"decision": "SKIP"})
+    assert res.json()["status"] == "REJECTED"
+    matches = client.get(f"/jobs/{job['id']}/matches").json()
+    assert matches["total_matches"] == 0
+
+    rejected = client.get("/candidates/94771234567/applications?status=REJECTED").json()
+    assert len(rejected) == 1
+    assert rejected[0]["job_id"] == job["id"]
+
+    # Reapply: REJECTED -> APPLIED
+    res = client.patch(f"/jobs/{job['id']}/applicants/94771234567", json={"decision": "APPLY"})
+    assert res.json()["status"] == "APPLIED"
+    matches = client.get(f"/jobs/{job['id']}/matches").json()
+    assert matches["total_matches"] == 1
+
+    applied = client.get("/candidates/94771234567/applications?status=APPLIED").json()
+    assert len(applied) == 1

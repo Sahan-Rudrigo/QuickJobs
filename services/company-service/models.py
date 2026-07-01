@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, DateTime, Text, ARRAY
+from sqlalchemy import Column, String, Integer, DateTime, Text, ARRAY, UniqueConstraint
 from sqlalchemy.sql import func
 from database import Base
 
@@ -35,10 +35,20 @@ class Job(Base):
     updated_at   = Column(DateTime(timezone=True), onupdate=func.now())
 
 
-class JobMatch(Base):
-    __tablename__ = "job_matches"
+class JobApplication(Base):
+    """
+    One row per (job_id, phone) pair, tracking candidate consent.
+    NOTIFIED   — candidate was matched and notified, hasn't responded yet.
+    APPLIED    — candidate replied APPLY; visible to the employer.
+    REJECTED   — candidate replied SKIP; can still reapply later (-> APPLIED).
+    """
+    __tablename__ = "job_applications"
 
-    id             = Column(Integer, primary_key=True, autoincrement=True)
-    job_id         = Column(String, nullable=False, index=True)
-    matched_phones = Column(ARRAY(String), default=[])
-    matched_at     = Column(DateTime(timezone=True), server_default=func.now())
+    id           = Column(Integer, primary_key=True, autoincrement=True)
+    job_id       = Column(String, nullable=False, index=True)
+    phone        = Column(String, nullable=False, index=True)
+    status       = Column(String, nullable=False, default="NOTIFIED")
+    notified_at  = Column(DateTime(timezone=True), server_default=func.now())
+    responded_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (UniqueConstraint("job_id", "phone", name="uq_job_application_job_phone"),)

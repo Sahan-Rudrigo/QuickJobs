@@ -13,7 +13,7 @@ async def send_text(to: str, message: str) -> None:
     """Send a WhatsApp text message."""
     phone_id = os.getenv("WHATSAPP_PHONE_ID")
     async with httpx.AsyncClient() as client:
-        await client.post(
+        resp = await client.post(
             f"{GRAPH_URL}/{phone_id}/messages",
             headers=_auth_headers(),
             json={
@@ -23,6 +23,11 @@ async def send_text(to: str, message: str) -> None:
                 "text": {"body": message},
             },
         )
+
+    if resp.status_code != 200:
+        print(f"[ERROR] WhatsApp send_text to {to} failed {resp.status_code}: {resp.text}")
+    else:
+        print(f"[DEBUG] WhatsApp send_text to {to} succeeded: {resp.text}")
 
 
 async def get_media_url(media_id: str) -> tuple[str, str]:

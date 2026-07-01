@@ -18,3 +18,15 @@ def set_state(phone: str, step: str, data: dict = {}):
 
 def clear_state(phone: str):
     r.delete(f"state:{phone}")
+
+
+def peek_pending_offer(phone: str) -> dict | None:
+    """Return the oldest unresolved job offer for this phone, without removing it."""
+    raw = r.lindex(f"pending_offers:{phone}", 0)
+    return json.loads(raw) if raw else None
+
+
+def pop_pending_offer(phone: str) -> dict | None:
+    """Remove and return the oldest unresolved job offer for this phone."""
+    raw = r.lpop(f"pending_offers:{phone}")
+    return json.loads(raw) if raw else None

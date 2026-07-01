@@ -118,9 +118,12 @@ services:
       - REDIS_URL=redis://redis:6379
       - USER_SERVICE_URL=http://user-service:8001
       - FILE_SERVICE_URL=http://file-service:8002
+      - COMPANY_SERVICE_URL=http://company-service:8003
     ports:
       - "8000:8000"
     depends_on:
+      company-service:
+        condition: service_started
       redis:
         condition: service_healthy
       user-service:
