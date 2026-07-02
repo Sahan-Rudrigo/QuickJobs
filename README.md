@@ -288,14 +288,6 @@ Instead of a self-hosted Netflix Eureka server, QuickJobs uses **AWS ECS service
 - **RBAC enforcement**: Routes are protected by role, so a normal user cannot invoke admin endpoints.
 - **Load balancing behind the gateway**: The gateway forwards traffic to an internet-facing Application Load Balancer (`quickjobs-alb`), which distributes requests across the ECS containers in two availability zones.
 
-Deployed API Gateway routes (`quickjobs-api`):
-
-![AWS API Gateway Configuration](docs/images/aws-api-gateway.png)
-
-Application Load Balancer (`quickjobs-alb`) distributing traffic across ECS containers:
-
-![AWS Application Load Balancer](docs/images/aws-load-balancer.png)
-
 ---
 
 ## 4. User Interface
