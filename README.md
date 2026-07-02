@@ -299,7 +299,7 @@ QuickJobs has three user-facing interfaces:
 1. **WhatsApp (Job Seekers)**: No separate app is required. Candidates interact entirely through a WhatsApp conversation powered by the Meta WhatsApp Cloud API (v18.0). The gateway's state machine guides them through registration, CV upload, profile updates and opt-in/opt-out commands.
 
 <p align="center">
-  <video src="docs/images/whatsapp-demo.mp4" width="320" controls></video>
+  <video src="docs/whatsapp-demo.mp4" width="320" controls></video>
 </p>
 
 2. **Employer Dashboard (Next.js 14)**: Built with **Next.js 14, TypeScript and Tailwind CSS**, deployed on **AWS Amplify**. Employers register their company, post jobs with skill requirements, manage postings and view ranked matched candidates. Login uses **AWS Amplify Auth**, which integrates with Cognito for seamless JWT-based sessions.
