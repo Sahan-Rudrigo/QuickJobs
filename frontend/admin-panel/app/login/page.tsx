@@ -101,24 +101,6 @@ export default function AdminLoginPage() {
           <p className="text-indigo-200/70 text-sm mt-1 ml-[52px]">Internal Operations Portal</p>
         </div>
 
-        {/* Feature list */}
-        <div className="relative z-10 space-y-4">
-          {[
-            { label: 'Company Approvals',  desc: 'Review and approve employer registrations' },
-            { label: 'Job Oversight',      desc: 'Monitor all active and closed listings'    },
-            { label: 'User Management',    desc: 'Manage job seekers and opt-in status'      },
-            { label: 'Platform Analytics', desc: 'Track match rates and engagement metrics'  },
-          ].map(f => (
-            <div key={f.label} className="flex items-start gap-3">
-              <div className="w-1.5 h-1.5 rounded-full mt-2 shrink-0" style={{ background: 'rgba(255,255,255,0.5)' }} />
-              <div>
-                <p className="text-white text-sm font-medium">{f.label}</p>
-                <p className="text-indigo-200/60 text-xs mt-0.5">{f.desc}</p>
-              </div>
-            </div>
-          ))}
-        </div>
-
         {/* Footer note */}
         <div className="relative z-10">
           <p className="text-indigo-200/40 text-xs">Restricted access — authorised personnel only</p>
