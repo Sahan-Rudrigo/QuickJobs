@@ -1,290 +1,408 @@
 # QuickJobs
 
-A WhatsApp-first AI-powered job matching platform for blue-collar and semi-skilled workers in Sri Lanka.
+**AI-powered job matching platform that connects talent with job opportunities through WhatsApp**
 
-Candidates register, upload CVs, and receive personalised job alerts entirely through WhatsApp — no app download or website required. Employers post jobs through a web dashboard, and an AI matching engine automatically finds the best-fit candidates using vector embeddings.
 
----
+## Table of Contents
 
-## Architecture Overview
-
-```
-Candidate (WhatsApp)          Employer (Browser)         Admin (Browser)
-        |                             |                         |
-        v                             v                         v
-  Meta Cloud API            Employer Dashboard           Admin Panel
-  graph.facebook.com         Next.js + Cognito          Next.js + Cognito
-        |                             |                         |
-        | Webhook                     +──────────┬──────────────+
-        v                                        v
- WhatsApp Gateway :8000              Company Service :8003
-  State machine                      Job posting · Company approval
-  Redis sessions                     Admin endpoints
-        |                                        |
-        |── POST /users ──► User Service :8001   |── POST /match/job ──►  Matching Service :8004
-        |                   Candidate profiles   |                        Pinecone vectors
-        |                                        |                        Sentence-BERT
-        |── POST /cv ──────► File Service :8002  |
-                             S3 upload            |── SQS: job-matched ──► Notification Service :8005
-                             SQS: cv-uploaded ────┘                        WhatsApp alerts
-                                     |
-                                     └──► Matching Service (reverse match)
-```
+1. [Introduction](#1-introduction)
+2. [Architecture](#2-architecture)
+3. [Microservices](#3-microservices)
+4. [User Interface](#4-user-interface)
+5. [Deployment](#5-deployment)
 
 ---
 
-## Services
+## 1. Introduction
 
-| Service | Port | Responsibility |
-|---|---|---|
-| WhatsApp Gateway | 8000 | Receives Meta webhooks, runs conversation state machine, routes CV uploads |
-| User Service | 8001 | Manages candidate profiles (name, skills, experience, location, salary) |
-| File Service | 8002 | Extracts CV text (PDF/DOCX), uploads to S3, publishes SQS event |
-| Company Service | 8003 | Company registration, job posting, admin approval, AI matching trigger |
-| Matching Service | 8004 | Sentence-BERT embeddings + Pinecone vector search for job-candidate matching |
-| Notification Service | 8005 | Polls SQS job-matched queue, sends WhatsApp alerts via Meta Graph API |
+Recruitment today is broken. Job seekers spend hours searching through listings while companies struggle to reach the right candidates. QuickJobs is a smart, WhatsApp-based job matching platform built to fix that.
 
-### Frontend
+QuickJobs is a **distributed, push-based job matching platform** that automatically delivers relevant job alerts to candidates via WhatsApp. No searching is required. Instead of candidates pulling job listings, the system pushes the right opportunity to the right person at the right time.
 
-| App | Description |
+### Core Features
+
+- **WhatsApp onboarding**: Job seekers register their profile once by sending a WhatsApp message. A conversational state machine collects their name, skills, location and CV.
+- **CV processing**: Candidates upload their CV (PDF or DOCX) directly in WhatsApp. Text is extracted automatically, including OCR for scanned documents.
+- **AI-powered matching**: CVs and job descriptions are converted into vector embeddings and matched using cosine similarity, capturing semantic meaning rather than exact keywords.
+- **Real-time notifications**: Matched candidates receive a WhatsApp alert within seconds of a job being posted.
+- **Employer web portal**: Companies register, post jobs, and view ranked matched candidates through a Next.js dashboard.
+- **Admin panel**: Admins approve or reject company registrations and monitor platform-wide statistics.
+- **Privacy compliance (PDPA)**: Candidates can opt out with STOP or erase all their data with DELETE MY DATA at any time.
+
+### Main Actors
+
+1. **Job Seekers** - interact entirely via WhatsApp
+2. **Employers** - post and manage jobs via the web portal
+3. **Admin** - manages company approvals and platform statistics
+
+The overall goal is to transform recruitment from a manual, pull-based model into an automated, push-driven distributed system that is scalable, fault tolerant and reliable.
+
+---
+
+## 2. Architecture
+
+### 2.1 Architectural Diagram
+
+![High-Level Architecture Diagram](docs/images/architecture-diagram.png)
+
+Traffic flow: WhatsApp webhooks and the two Vercel/Amplify-hosted Next.js frontends enter through **AWS API Gateway** (Cognito JWT validation and rate limiting), pass through an **Application Load Balancer**, and reach **six FastAPI microservices** running as containers on **AWS ECS**. Services communicate asynchronously through **Amazon SQS** queues (`cv-uploaded`, `job-posted`, `job-matched`). The data layer consists of **PostgreSQL** (per-service databases), **Amazon S3** (CV files), **Pinecone** (vector embeddings) and **Redis** (conversation state, opt-in cache, deduplication).
+
+### 2.2 Design Decisions
+
+**Decision 1: Microservices + Event-Driven Architecture (EDA)**
+
+The application is split into six independent services rather than a monolith, for three reasons:
+
+- **Independent scalability**: The Matching Service can scale alone during job-posting spikes without scaling the whole system.
+- **Fault isolation**: A Notification Service failure does not crash the User or Matching services.
+- **Team autonomy**: Each service can be developed, deployed and updated independently by different team members.
+
+Services are decoupled through events rather than tight synchronous coupling:
+
+![Event-Driven Pattern](docs/images/event-driven-pattern.png)
+
+- **Async processing**: SQS queues decouple producers from consumers.
+- **Real-time pipeline**: `CV.Uploaded`, `Job.Posted` and `Job.Matched` events flow automatically through the system.
+- **No data loss**: If the Notification Service is down, events queue up in SQS and are replayed when it recovers. Dead-letter queues capture repeatedly failing messages.
+
+**Decision 2: How each service contributes**
+
+| Service | Contribution to overall functionality |
 |---|---|
-| `frontend/employer-dashboard` | Next.js dashboard for employers — post jobs, view matched candidates |
-| `frontend/admin-panel` | Next.js admin panel — approve companies, monitor platform KPIs |
+| WhatsApp Gateway | Candidate entry point; runs the onboarding conversation state machine |
+| User Service | Single source of truth for candidate profiles, skills and opt-in status |
+| File Service | Receives CVs, extracts text, stores files in S3, publishes `cv-uploaded` events |
+| Company Service | Company registration, admin approval workflow and job posting; triggers matching |
+| Matching Service | Embeds CVs and jobs into vectors and runs cosine-similarity matching |
+| Notification Service | Consumes `job-matched` events and sends WhatsApp alerts via the Meta API |
 
----
+**Decision 3: Database per service**
 
-## Technology Stack
+Each microservice owns its own database with no cross-service direct DB access. This prevents tight coupling and allows independent schema changes and scaling.
 
-- **Backend:** FastAPI (Python 3.11)
-- **Frontend:** Next.js 14, TypeScript, Tailwind CSS
-- **Auth:** AWS Cognito (employers + admins)
-- **Database:** PostgreSQL 15
-- **Cache / Sessions:** Redis 7
-- **File Storage:** AWS S3
-- **Message Queue:** AWS SQS
-- **Vector Database:** Pinecone
-- **AI / Embeddings:** Sentence-Transformers (`all-MiniLM-L6-v2`)
-- **WhatsApp API:** Meta Graph API v18.0
-- **Infrastructure:** Docker, Docker Compose
+- **PostgreSQL**: structured, relational data needing strong consistency (profiles, companies, jobs)
+- **Amazon S3**: binary files (PDF, DOCX CVs)
+- **Pinecone**: high accuracy and performance for high-dimensional vector retrieval
+- **Redis**: fast key-value lookups for conversation state, opt-in caching and notification deduplication
 
----
+**Decision 4: Zero Trust security boundary**
 
-## Candidate Conversation Flow
+All traffic enters via API Gateway + Cognito with JWT validated at the edge. Every route and service is protected with role-based access control (RBAC), so, for example, a normal user cannot access an admin endpoint.
 
-```
-Send "Hi"          → Registration begins
-Name               → Enter full name
-Skills             → e.g. Python, React, SQL
-Experience         → 1=Junior  2=Mid  3=Senior  4=Lead
-Location           → City or region
-Salary             → e.g. 80000-150000 (LKR)
-Upload CV (PDF)    → Profile complete, AI matching activated
-```
+**Architectural trade-offs considered**
 
-Once registered, candidates receive WhatsApp alerts when a matching job is posted. They can update their profile at any time by replying with the menu number, or type `STOP` to unsubscribe and `DELETE MY DATA` for full PDPA erasure.
-
----
-
-## Job Posting Flow
-
-1. Employer posts a job on the Dashboard
-2. Company Service saves the job and calls Matching Service
-3. Matching Service embeds the job description and queries Pinecone for matching CV vectors
-4. Matched candidate phone numbers are returned
-5. Company Service publishes a `job-matched` SQS event
-6. Notification Service picks it up and sends each matched candidate a WhatsApp alert
-
----
-
-## Quick Start (Docker Compose)
-
-```bash
-# 1. Clone the repository
-git clone https://github.com/Sahan-Rudrigo/QuickJobs.git
-cd QuickJobs
-
-# 2. Add .env files for each service (see .env.example in each service directory)
-
-# 3. Start infrastructure + all services
-docker-compose -f infra/docker-compose.yml up --build
-```
-
-Services start automatically in dependency order. All database tables are created on first run.
-
-### Manual startup order (without Docker)
-
-```bash
-# 1. Infrastructure
-docker run -d -p 5433:5432 -e POSTGRES_DB=quickjobs -e POSTGRES_USER=admin -e POSTGRES_PASSWORD=password123 postgres:15
-docker run -d -p 6379:6379 redis:7
-
-# 2-7. Each service
-cd services/user-service    && uvicorn main:app --port 8001
-cd services/file-service    && uvicorn main:app --port 8002
-cd services/company-service && uvicorn main:app --port 8003
-cd services/matching-service && uvicorn main:app --port 8004
-cd services/notification-service && uvicorn main:app --port 8005
-cd services/whatsapp-gateway && uvicorn main:app --host 0.0.0.0 --port 8000
-
-# 8. Expose gateway to Meta
-ngrok http 8000
-# Set webhook in Meta Developer Console: https://<ngrok-url>/webhook
-# Verify token: quickjobs_verify_123
-```
-
----
-
-## Setup & Running
-
-### Prerequisites
-
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/)
-- [ngrok](https://ngrok.com/download) (for exposing the local gateway to Meta)
-- Meta Developer account with a WhatsApp Business App
-
-### Step 1 — Configure environment variables
-
-Create a `.env` file in each service directory. Use the values below as a guide:
-
-**`services/whatsapp-gateway/.env`**
-```env
-WHATSAPP_TOKEN=<your_meta_access_token>
-WHATSAPP_PHONE_ID=<your_phone_number_id>
-WHATSAPP_VERIFY_TOKEN=quickjobs_verify_123
-REDIS_URL=redis://redis:6379
-USER_SERVICE_URL=http://user-service:8001
-FILE_SERVICE_URL=http://file-service:8002
-```
-
-**`services/user-service/.env`**
-```env
-DATABASE_URL=postgresql://admin:password123@postgres:5432/quickjobs
-REDIS_URL=redis://redis:6379
-PORT=8001
-```
-
-**`services/file-service/.env`**
-```env
-DATABASE_URL=postgresql://admin:password123@postgres:5432/quickjobs
-AWS_REGION=ap-south-1
-AWS_ACCESS_KEY_ID=<your_aws_access_key>
-AWS_SECRET_ACCESS_KEY=<your_aws_secret_key>
-S3_BUCKET_NAME=quickjobs-cvs
-SQS_CV_UPLOADED_URL=<your_sqs_queue_url>
-PORT=8002
-```
-
-> **Note:** `WHATSAPP_PHONE_ID` is the **Phone Number ID** found in Meta Developer Console → WhatsApp → API Setup. This is different from the WhatsApp Business Account ID.
-
-### Step 2 — Start services for WhatsApp testing
-
-To test the WhatsApp send/receive flow, start these 5 services:
-
-```bash
-docker compose -f infra/docker-compose.yml up postgres redis user-service file-service whatsapp-gateway -d
-```
-
-Verify all containers are running:
-```bash
-docker compose -f infra/docker-compose.yml ps
-```
-
-Check the gateway health:
-```bash
-curl http://localhost:8000/health
-# Expected: {"status":"ok","service":"whatsapp-gateway","port":8000}
-```
-
-### Step 3 — Expose the gateway with ngrok
-
-```bash
-ngrok http 8000
-```
-
-ngrok will give you a public URL like `https://xxxx.ngrok-free.app`.
-
-### Step 4 — Configure webhook in Meta Developer Console
-
-1. Go to **Meta Developer Console → your App → WhatsApp → Configuration**
-2. Set **Webhook URL** to: `https://<your-ngrok-url>/webhook`
-3. Set **Verify Token** to: `quickjobs_verify_123`
-4. Click **Verify and Save**
-5. Under **Webhook Fields**, subscribe to **messages**
-
-### Step 5 — Test the bot
-
-Send **"hi"** from a whitelisted test number to your WhatsApp Business number. The bot will guide you through the full registration flow.
-
-Watch live logs:
-```bash
-docker logs quickjobs-whatsapp-gateway -f
-```
-
-### Starting all services
-
-To run the complete platform including employer dashboard and notification service:
-
-```bash
-docker compose -f infra/docker-compose.yml up -d
-```
-
----
-
-## Environment Variables
-
-Each service has a `.env.example` file listing required variables. The key ones:
-
-| Variable | Used By | Description |
+| Decision | Trade-off | Mitigation |
 |---|---|---|
-| `WHATSAPP_TOKEN` | Gateway, Notification | Meta API bearer token |
-| `WHATSAPP_PHONE_ID` | Gateway, Notification | Meta phone number ID |
-| `WHATSAPP_VERIFY_TOKEN` | Gateway | Webhook verification secret |
-| `DATABASE_URL` | All backend services | PostgreSQL connection string |
-| `REDIS_URL` | Gateway, User, Notification | Redis connection string |
-| `PINECONE_API_KEY` | Matching Service | Pinecone vector DB key |
-| `PINECONE_INDEX` | Matching Service | Pinecone index name |
-| `SQS_CV_UPLOADED_URL` | File, Matching | SQS queue URL for CV events |
-| `SQS_JOB_MATCHED_URL` | Company, Notification | SQS queue URL for match events |
-| `AWS_ACCESS_KEY_ID` | File, Matching, Notification | AWS credentials |
-| `COGNITO_USER_POOL_ID` | User, Company | Cognito pool for JWT validation |
+| Microservices | Higher operational complexity vs monolith | CI/CD pipelines; service mesh (future) |
+| Eventual consistency | Data may briefly lag across services | Accepted for the notification use case |
+| WhatsApp API dependency | Platform risk if Meta changes policies | SMS fallback channel planned |
+| Pinecone Vector DB | Per-query cost increases at scale | OpenSearch as open-source fallback |
 
 ---
 
-## API Documentation
+## 3. Microservices
 
-Each FastAPI service auto-generates interactive API docs:
+### 3.1 Implementation Methods
 
-| Service | Docs URL |
-|---|---|
-| WhatsApp Gateway | http://localhost:8000/docs |
-| User Service | http://localhost:8001/docs |
-| File Service | http://localhost:8002/docs |
-| Company Service | http://localhost:8003/docs |
-| Matching Service | http://localhost:8004/docs |
-| Notification Service | http://localhost:8005/docs |
+All six services are implemented as **Python 3.11 + FastAPI** applications, containerised with **Docker** and deployed on **AWS ECS**. Rather than the classic Netflix OSS stack, this project uses the equivalent AWS-managed services, which provide the same distributed-systems capabilities without self-hosting the infrastructure:
+
+| Concern | Netflix OSS component | Equivalent used in QuickJobs |
+|---|---|---|
+| API Gateway / edge routing | Zuul | AWS API Gateway |
+| Service discovery and registration | Eureka | AWS ECS service discovery + ALB target groups |
+| Client-side load balancing | Ribbon | AWS Application Load Balancer |
+| Fault tolerance / circuit breaking | Hystrix | SQS queues with dead-letter queues and retries |
+| Monitoring | Atlas / Turbine | Amazon CloudWatch + X-Ray |
+
+Each service exposes a REST interface (documented automatically by FastAPI's OpenAPI/Swagger), owns its own data store, and communicates with other services either synchronously over HTTP (when an immediate response is required) or asynchronously through Amazon SQS (for heavy, decoupled work).
+
+**Services at a glance**
+
+| Service | Port | Data Store | Core Responsibility |
+|---|---|---|---|
+| WhatsApp Gateway | 8000 | Redis (state) | Candidate entry point; onboarding conversation state machine |
+| User Service | 8001 | PostgreSQL | Source of truth for candidate profiles, skills, opt-in status |
+| File Service | 8002 | PostgreSQL + S3 | Receives CVs, extracts text, stores files, publishes `cv-uploaded` |
+| Company Service | 8003 | PostgreSQL | Company registration, admin approval workflow, job posting |
+| Matching Service | 8004 | Pinecone | Embeds CVs and jobs into vectors, runs cosine-similarity matching |
+| Notification Service | 8005 | Redis (read-only) | Watches `job-matched` queue, sends WhatsApp alerts via Meta API |
+
+### 3.2 Core Services
+
+#### 3.2.1 WhatsApp Gateway (Port 8000)
+
+**Functionality**: The candidate-facing entry point. It receives Meta webhook events and runs a per-phone conversation state machine (`IDLE → AWAITING_NAME → ... → ACTIVE`) that walks new candidates through onboarding. It downloads uploaded CV media from the Meta Graph API and forwards it for processing, handles `STOP` / `START` opt-out and opt-in commands and `DELETE MY DATA` (PDPA) requests, and persists conversation state in Redis keyed by phone number.
+
+**REST API endpoints**
+
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/webhook` | Meta webhook verification handshake |
+| POST | `/webhook` | Receives incoming WhatsApp messages and media events |
+| GET | `/health` | Liveness check used by the load balancer |
+| GET | `/docs` | Auto-generated Swagger UI (OpenAPI schema at `/openapi.json`) |
+
+**Inter-service interactions**
+
+![WhatsApp Gateway Interactions](docs/images/whatsapp-gateway-interactions.png)
+
+- Calls **User Service** to create the candidate profile once onboarding completes
+- Forwards raw CV media bytes to **File Service**
+- Reads/writes conversation state in **Redis**
+- Receives webhooks from and sends replies via the **Meta Graph API**
+
+#### 3.2.2 User Service (Port 8001)
+
+**Functionality**: The single source of truth for candidate data. It creates the candidate profile once WhatsApp onboarding completes, applies profile updates (skills, location, salary) from the WhatsApp menu, stores the CV's S3 key once the File Service uploads it, caches opt-in status in Redis (7-day TTL) for fast notification checks, and handles PDPA deletion by permanently removing a candidate's record.
+
+**REST API endpoints**
+
+| Method | Endpoint | Description |
+|---|---|---|
+| POST | `/users` | Create a candidate profile |
+| GET | `/users/{phone}` | Fetch a candidate profile |
+| PATCH | `/users/{phone}` | Update profile fields (skills, location, salary) |
+| PATCH | `/users/{phone}/opt-out` | Unsubscribe candidate from alerts |
+| PATCH | `/users/{phone}/opt-in` | Re-subscribe candidate to alerts |
+| DELETE | `/users/{phone}` | PDPA deletion of all candidate data |
+
+**Inter-service interactions**
+
+![User Service Interactions](docs/images/user-service-interactions.png)
+
+- Receives onboarding data from the **WhatsApp Gateway** to create profiles
+- Supplies matched candidate details to the **Company Service** for the employer dashboard
+- Caches opt-in status in **Redis** on every profile change
+- **Matching Service** indirectly reads profile data via extracted CV text
+
+#### 3.2.3 File Service (Port 8002)
+
+**Functionality**: Handles all CV documents. It receives raw CV bytes (PDF/DOCX) forwarded from the WhatsApp Gateway, extracts text using PyMuPDF for digital PDFs, pytesseract OCR for scanned documents and python-docx for Word files, uploads the file to S3 under `candidates/{phone}/cv_v{version}` (keeping a maximum of 3 versions), and publishes a `cv-uploaded` SQS event so the Matching Service can embed the CV.
+
+**REST API endpoints**
+
+| Method | Endpoint | Description |
+|---|---|---|
+| POST | `/cv/upload/{phone}` | Upload and process a CV |
+| GET | `/cv/{phone}/latest/download` | Get a presigned S3 URL for the latest CV |
+| GET | `/cv/{phone}/versions` | List stored CV versions |
+| DELETE | `/cv/{phone}` | PDPA deletion of all CV files |
+
+**Inter-service interactions**
+
+![File Service Interactions](docs/images/file-service-interactions.png)
+
+- Receives raw CV bytes from the **WhatsApp Gateway**
+- Updates the **User Service** with the S3 file key
+- Stores physical files in **Amazon S3**
+- Publishes extracted text to the **`cv-uploaded` SQS queue** for AI embedding
+
+#### 3.2.4 Company Service (Port 8003)
+
+**Functionality**: Manages employer companies and job listings. It handles company registration and the `PENDING → APPROVED / REJECTED / SUSPENDED` admin approval workflow, job posting, closing, reopening and deletion. It triggers the AI matching pipeline whenever a job is posted and serves platform-wide statistics to the Admin Panel.
+
+**REST API endpoints**
+
+| Method | Endpoint | Description |
+|---|---|---|
+| POST | `/companies` | Register a new company |
+| GET | `/companies/by-user/{cognito_user_id}` | Get company by Cognito user |
+| GET | `/companies/{company_id}` | Get company details |
+| POST | `/companies/{company_id}/jobs` | Post a job (triggers embed + match + notify) |
+| GET | `/companies/{company_id}/jobs` | List a company's jobs |
+| PATCH | `/jobs/{job_id}/status` | Close or reopen a job |
+| DELETE | `/jobs/{job_id}` | Delete a job posting |
+| GET | `/jobs/{job_id}/matches` | Get ranked matched candidates for a job |
+| PATCH | `/admin/companies/{id}/activate` | Admin approves a company |
+| GET | `/admin/stats` | Platform-wide KPIs for the Admin Panel |
+
+**Inter-service interactions**
+
+![Company Service Interactions](docs/images/company-service-interactions.png)
+
+- Calls the **Matching Service** synchronously to trigger the AI match pipeline on each new job post
+- Fetches matched candidate profiles from the **User Service** for the employer dashboard
+- Publishes match events to the **`job-matched` SQS queue** for candidate alerts
+- Validates JWTs and manages admin access via **AWS Cognito**
+
+#### 3.2.5 Matching Service (Port 8004)
+
+**Functionality**: The AI core of the platform. It converts CV text and job descriptions into 384-dimension vectors with Sentence-Transformers (`all-MiniLM-L6-v2`), stores vectors in Pinecone and runs cosine-similarity search (threshold ≈ 0.65). Matching runs in both directions: Job → Candidates when a job is posted, and Candidate → Jobs when a CV is uploaded. A background thread continuously polls the `cv-uploaded` SQS queue.
+
+**REST API endpoints**
+
+| Method | Endpoint | Description |
+|---|---|---|
+| POST | `/embed/job` | Embed and store a job vector |
+| POST | `/embed/{phone}` | Embed and store a candidate CV vector |
+| POST | `/match/job` | Find matching candidates for a job |
+| POST | `/match/candidate` | Find matching jobs for a candidate |
+| DELETE | `/embed/job/{id}` | Remove a job vector |
+| GET | `/index/stats` | Pinecone index statistics |
+
+**Inter-service interactions**
+
+![Matching Service Interactions](docs/images/matching-service-interactions.png)
+
+- Consumes CV text from the **`cv-uploaded` SQS queue** to generate vectors
+- Serves synchronous reverse-match requests from the **Company Service** on new job posts
+- Upserts 384-dim vectors into **Pinecone** and runs cosine-similarity queries
+
+#### 3.2.6 Notification Service (Port 8005)
+
+**Functionality**: A fully decoupled, event-driven dispatcher. It continuously polls the `job-matched` SQS queue in a background thread. Before sending, it checks Redis `opt_in:{phone}` (skip if the candidate opted out) and `notified:{job_id}:{phone}` (skip if already alerted, preventing duplicates). It then sends the WhatsApp match notification via the Meta Graph API and sets a 7-day TTL deduplication key in Redis after every successful send. This service executes zero direct HTTP calls to other QuickJobs services.
+
+**Interface**
+
+| Type | Endpoint / Step | Description |
+|---|---|---|
+| GET | `/health` | Liveness check |
+| GET | `/docs` | Auto-generated Swagger UI (OpenAPI schema at `/openapi.json`) |
+| Event | Consume `job-matched` from SQS | Trigger for every match notification |
+| Event | Check Redis `opt_in:{phone}` | Skip if the candidate opted out |
+| Event | Check Redis `notified:{job_id}:{phone}` | Skip if already notified (dedup) |
+| Event | Send WhatsApp alert via Meta Graph API | Deliver the match to the candidate |
+
+**Inter-service interactions**
+
+![Notification Service Interactions](docs/images/notification-service-interactions.png)
+
+### 3.3 Discovery Server (Service Registration and Monitoring)
+
+Instead of a self-hosted Netflix Eureka server, QuickJobs uses **AWS ECS service discovery together with Application Load Balancer target groups**, which provide the same registration and health-monitoring behaviour as a managed service:
+
+- **Registration**: When ECS launches a new container task for any of the six services, the task is automatically registered into the corresponding ALB target group with its private IP and port. Nothing is configured manually inside the service; the ECS service definition handles registration, exactly as a Eureka client would self-register on startup.
+- **Monitoring (health checks)**: The ALB continuously calls each task's `GET /health` endpoint. This replaces Eureka's heartbeat mechanism. A task that fails consecutive health checks is marked unhealthy.
+- **Deregistration and self-healing**: Unhealthy tasks are automatically drained and deregistered from the target group so no traffic reaches them, and the ECS scheduler replaces them with fresh containers to maintain the desired task count.
+- **Routing**: Because the registry (target group) is always current, the load balancer only ever routes requests to healthy, registered instances, even while services scale in and out.
+
+### 3.4 API Gateway
+
+**Role in the system**: AWS API Gateway is the single entry point for all external traffic (WhatsApp webhooks, the Employer Dashboard and the Admin Panel). Nothing reaches a microservice without passing through it.
+
+**Configurations used**:
+
+- **Cognito JWT authoriser**: API Gateway validates the JWT issued by AWS Cognito at the edge, before any request reaches a service. Invalid or missing tokens are rejected immediately.
+- **Rate limiting**: Throttling rules prevent any single user or company from overloading the system, acting as the first line of defence at scale.
+- **Proxy route integrations**: Routes such as `/admin/{proxy+}` forward matched paths to the correct backend integration, keeping routing configuration in one place.
+- **RBAC enforcement**: Routes are protected by role, so a normal user cannot invoke admin endpoints.
+- **Load balancing behind the gateway**: The gateway forwards traffic to an internet-facing Application Load Balancer (`quickjobs-alb`), which distributes requests across the ECS containers in two availability zones.
+
+Deployed API Gateway routes (`quickjobs-api`):
+
+![AWS API Gateway Configuration](docs/images/aws-api-gateway.png)
+
+Application Load Balancer (`quickjobs-alb`) distributing traffic across ECS containers:
+
+![AWS Application Load Balancer](docs/images/aws-load-balancer.png)
 
 ---
 
-## Project Structure
+## 4. User Interface
+
+### 4.1 Implementation Details
+
+QuickJobs has three user-facing interfaces:
+
+1. **WhatsApp (Job Seekers)**: No separate app is required. Candidates interact entirely through a WhatsApp conversation powered by the Meta WhatsApp Cloud API (v18.0). The gateway's state machine guides them through registration, CV upload, profile updates and opt-in/opt-out commands.
+
+<p align="center">
+  <img src="docs/images/whatsapp-demo.png" alt="WhatsApp Onboarding Conversation" width="320">
+</p>
+
+2. **Employer Dashboard (Next.js 14)**: Built with **Next.js 14, TypeScript and Tailwind CSS**, deployed on **AWS Amplify**. Employers register their company, post jobs with skill requirements, manage postings and view ranked matched candidates. Login uses **AWS Amplify Auth**, which integrates with Cognito for seamless JWT-based sessions.
+   - Live: https://production.d1jd2yt3j6ryo.amplifyapp.com/login
+
+3. **Admin Panel (Next.js 14)**: A separate Next.js application, also on Amplify, where admins approve or reject company registrations and view platform-wide KPIs served by the Company Service's `/admin/stats` endpoint.
+   - Live: https://production.d3175lbd78q5v2.amplifyapp.com/login
+
+### 4.2 API Testing Tools
+
+Two complementary approaches were used to test the application's APIs:
+
+**Swagger UI (FastAPI `/docs`)**: Every FastAPI service auto-generates an interactive OpenAPI (Swagger) interface. This was used for API-level testing during development: sending requests and inspecting responses per endpoint, exactly as one would with Postman, but generated directly from the service code so the documentation can never drift from the implementation.
+
+![Swagger UI API Testing](docs/images/swagger-ui-testing.png)
+
+**Automated tests (pytest)**: Automated test cases were written for each service to validate endpoint behaviour and catch regressions. For example, the Matching Service suite runs 26 tests covering embedding, matching and queue-consumption logic.
+
+![Pytest Results](docs/images/pytest-results.png)
+
+---
+
+## 5. Deployment
+
+The platform is fully deployed on AWS in the `ap-south-1` region.
+
+### 5.1 Containers: AWS ECS + ECR
+
+Each service is built into a Docker image, pushed to a private **Amazon ECR** repository (`quickjobs/user-service`, `quickjobs/file-service`, `quickjobs/company-service`, `quickjobs/matching-service`, `quickjobs/notification-service`, `quickjobs/whatsapp-gateway`) and run as a task in the **`qucikjobs` ECS cluster** (6 services, 6 running tasks).
+
+![AWS ECS Cluster](docs/images/aws-ecs-cluster.png)
+
+![AWS ECR Repositories](docs/images/aws-ecr-repositories.png)
+
+### 5.2 Messaging: Amazon SQS
+
+Six standard queues (with SSE-SQS encryption) carry the event pipeline, each paired with a dead-letter queue so failed messages are never lost:
+
+- `quickjobs-cv-uploaded` / `quickjobs-cv-uploaded-dlq`
+- `quickjobs-job-posted` / `job-posted-dlq`
+- `quickjobs-job-matched` / `quickjobs-job-matched-dlq`
+
+![Amazon SQS Queues](docs/images/aws-sqs-queues.png)
+
+### 5.3 Frontends: AWS Amplify
+
+Both Next.js applications (`QuickJobs` employer dashboard and `quickJobs-admin` panel) are deployed through **AWS Amplify** from the `production` branch, giving automatic builds on every push.
+
+![AWS Amplify Deployments](docs/images/aws-amplify.png)
+
+### 5.4 Vector Database: Pinecone
+
+Candidate CV sections and job descriptions are stored as vectors in a **Pinecone** index and queried with cosine similarity at match time.
+
+![Pinecone Vector Database](docs/images/pinecone-vector-db.png)
+
+### 5.5 Local Development
+
+The repository includes `infra/docker-compose.yml`, which spins up all six services locally with a single command for development and testing:
+
+```bash
+docker compose -f infra/docker-compose.yml up --build
+```
+
+### Repository Structure
 
 ```
 QuickJobs/
-├── services/
-│   ├── whatsapp-gateway/     # Candidate WhatsApp interface
-│   ├── user-service/         # Candidate profile management
-│   ├── file-service/         # CV upload, extraction, S3
-│   ├── company-service/      # Employer + admin backend
-│   ├── matching-service/     # AI vector matching (Pinecone)
-│   └── notification-service/ # WhatsApp job alert delivery
+├── .github/workflows/        # CI/CD pipelines
 ├── frontend/
-│   ├── employer-dashboard/   # Next.js employer portal
-│   └── admin-panel/          # Next.js admin portal
-└── infra/
-    └── docker-compose.yml    # Full stack orchestration
+│   ├── admin-panel/           # Next.js Admin Panel
+│   └── employer-dashboard/    # Next.js Employer Dashboard
+├── infra/
+│   └── docker-compose.yml     # Local development stack
+├── services/
+│   ├── company-service/
+│   ├── file-service/
+│   ├── matching-service/
+│   ├── notification-service/
+│   ├── user-service/
+│   └── whatsapp-gateway/
+├── docs/images/               # README images
+├── .env.example
+└── README.md
 ```
 
 ---
+**Live Demo:**
+- Employer Dashboard: https://production.d1jd2yt3j6ryo.amplifyapp.com/login
+- Admin Panel: https://production.d3175lbd78q5v2.amplifyapp.com/login
 
-## Team
+---
+## References
 
-Built as a Distributed Systems mini-project.
+1. Meta Platforms, Inc., "WhatsApp Business Platform Documentation." https://developers.facebook.com/docs/whatsapp
+2. Amazon Web Services, "AWS Documentation." https://docs.aws.amazon.com/
+3. Vercel Inc., "Next.js Documentation." https://nextjs.org/docs
+4. FastAPI, "FastAPI Documentation." https://fastapi.tiangolo.com/
