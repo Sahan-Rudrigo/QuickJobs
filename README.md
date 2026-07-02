@@ -332,45 +332,46 @@ Two complementary approaches were used to test the application's APIs:
 
 ## 5. Deployment
 
-The platform is fully deployed on AWS in the `ap-south-1` region.
+The entire platform is deployed on AWS in the ap-south-1 (Mumbai) region, using managed services so that no servers are maintained manually.
 
 ### 5.1 Containers: AWS ECS + ECR
 
-Each service is built into a Docker image, pushed to a private **Amazon ECR** repository (`quickjobs/user-service`, `quickjobs/file-service`, `quickjobs/company-service`, `quickjobs/matching-service`, `quickjobs/notification-service`, `quickjobs/whatsapp-gateway`) and run as a task in the **`qucikjobs` ECS cluster** (6 services, 6 running tasks).
+Each of the six FastAPI services is packaged as a Docker image and pushed to its own private Amazon ECR repository (for example `quickjobs/user-service`, `quickjobs/matching-service`). The images are then run as tasks inside a single ECS cluster, with one ECS service per microservice keeping the desired number of tasks running at all times. If a container crashes or fails its health check, ECS automatically replaces it, giving the system self-healing behaviour without manual intervention.
 
-![AWS ECS Cluster](docs/images/aws-ecs-cluster.png)
+### 5.2 Traffic: API Gateway + Application Load Balancer
 
-![AWS ECR Repositories](docs/images/aws-ecr-repositories.png)
+All external traffic enters through AWS API Gateway, where Cognito JWTs are validated and rate limits are applied at the edge. Valid requests are forwarded to an internet-facing Application Load Balancer (quickjobs-alb) spanning two availability zones, which distributes the load across the healthy ECS containers using continuous health checks on each service's `/health` endpoint.
 
-### 5.2 Messaging: Amazon SQS
+### 5.3 Messaging: Amazon SQS
 
-Six standard queues (with SSE-SQS encryption) carry the event pipeline, each paired with a dead-letter queue so failed messages are never lost:
+Asynchronous communication between services runs on Amazon SQS standard queues with server-side encryption. Three main queues carry the event pipeline (quickjobs-cv-uploaded, quickjobs-job-posted, quickjobs-job-matched), and each is paired with a dead-letter queue so that repeatedly failing messages are captured for inspection rather than lost. This means, for example, that if the Notification Service is temporarily down, match events simply wait in the queue and are processed when it recovers.
 
-- `quickjobs-cv-uploaded` / `quickjobs-cv-uploaded-dlq`
-- `quickjobs-job-posted` / `job-posted-dlq`
-- `quickjobs-job-matched` / `quickjobs-job-matched-dlq`
+### 5.4 Data Layer
 
-![Amazon SQS Queues](docs/images/aws-sqs-queues.png)
+- **Amazon RDS (PostgreSQL)** stores structured relational data (candidate profiles, companies, jobs) with Multi-AZ failover for high availability.
+- **Amazon S3** stores the binary CV files (PDF/DOCX), keeping up to three versions per candidate.
+- **Amazon ElastiCache (Redis)** provides sub-millisecond lookups for WhatsApp conversation state, opt-in status caching and notification deduplication keys.
+- **Pinecone** (external managed service) stores the 384-dimension CV and job vectors used for cosine-similarity matching.
 
-### 5.3 Frontends: AWS Amplify
+### 5.5 Frontends: AWS Amplify
 
-Both Next.js applications (`QuickJobs` employer dashboard and `quickJobs-admin` panel) are deployed through **AWS Amplify** from the `production` branch, giving automatic builds on every push.
+Both Next.js applications (the Employer Dashboard and the Admin Panel) are deployed through AWS Amplify, connected to the production branch of the repository. Every push triggers an automatic build and deployment, and Amplify Auth integrates directly with Cognito for login.
 
-![AWS Amplify Deployments](docs/images/aws-amplify.png)
+### 5.6 Authentication: AWS Cognito
 
-### 5.4 Vector Database: Pinecone
+AWS Cognito manages employer and admin sign-up, login, token issuance and password reset. JWTs issued by Cognito are validated at the API Gateway before any request reaches a microservice, so no custom auth server had to be built or scaled.
 
-Candidate CV sections and job descriptions are stored as vectors in a **Pinecone** index and queried with cosine similarity at match time.
+### 5.7 Monitoring: CloudWatch
 
-![Pinecone Vector Database](docs/images/pinecone-vector-db.png)
+All services stream logs to Amazon CloudWatch, which was also used during development to verify that each service could publish and consume SQS messages correctly and to trace events end to end across services.
 
-### 5.5 Local Development
+### 5.8 Local Development
 
-The repository includes `infra/docker-compose.yml`, which spins up all six services locally with a single command for development and testing:
+For local development, the repository includes infra/docker-compose.yml, which spins up all six services with a single command:
 
-```bash
+​```bash
 docker compose -f infra/docker-compose.yml up --build
-```
+​```
 
 ### Repository Structure
 
